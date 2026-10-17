@@ -1,0 +1,23 @@
+diff --git a/source/libonion_detour/source/detour.cpp b/source/libonion_detour/source/detour.cpp
+index 20b7f86..8f56e4f 100644
+--- a/source/libonion_detour/source/detour.cpp
++++ b/source/libonion_detour/source/detour.cpp
+@@ -45,6 +45,7 @@ extern int (*sceKernelMprotect)(void *addr, size_t len, int prot)
+ 
+ // Optional: host sets true when userland mprotect works (kstuff HV path).
+ extern bool has_hv_bypass __attribute__((weak));
++extern bool detour_no_kernel_fallback __attribute__((weak));
+ 
+ namespace {
+ 
+@@ -90,6 +91,10 @@ int mprotect_rwx(void *addr, size_t len) {
+   } else if (mprotect_user(addr, len) >= 0) {
+     return 0;
+   }
++  /* bayo.sh: host may forbid kernel R/W in-process (etaHEN 13.60 froze ShellUI). */
++  if (&detour_no_kernel_fallback != nullptr && detour_no_kernel_fallback) {
++    return -1;
++  }
+   return kernel_mprotect(getpid(), reinterpret_cast<uint64_t>(addr), len,
+                          kProtRwx);
+ }
