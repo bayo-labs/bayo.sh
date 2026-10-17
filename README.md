@@ -83,7 +83,7 @@ El resultado queda en `dist/bayosh.elf`. El script aplica `patches/onionhen-deto
 
 ## Créditos
 
-Hecho por **Josué “Bayo” Hernández** · [BayoTech](#).
+Hecho por **Josué** · [BayoTech](#).
 
 bayo.sh es un proyecto derivado. El motor de video parte de **LiveShell** de ZiZc3 y usa el inyector, las librerías y el trabajo base de **[OnionHEN](https://github.com/aydencharles/onionHEN/)**. Los cambios de bayo.sh están en [CHANGELOG.md](CHANGELOG.md).
 
