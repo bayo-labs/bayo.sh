@@ -76,6 +76,15 @@ void        light_step();
 bool reset_settings(std::string& error);
 void request_shutdown(bool full = false);
 bool menu_mods_present(); // another ShellUI mod (OnionHEN-style) is running: restarting the menu is unsafe
+// bayosh_mp4.cpp
+struct Mp4Check {
+	bool        parsed = false;
+	bool        ok     = true; // unknown files count as playable
+	std::string codec, why;    // why: "4K 3840×2160 · 120 fps" when not ok
+	int         w = 0, h = 0;
+	double      fps = 0;
+};
+Mp4Check mp4_check(const std::string& path);
 // bayosh_net.cpp
 bool        start_download(const std::string& url, std::string& error);
 void        cancel_download();

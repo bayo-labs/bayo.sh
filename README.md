@@ -7,7 +7,7 @@
 <p align="center"><b>Fondos de pantalla animados en video para el inicio de tu PS5.</b></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/versión-0.3.0-22b8ff?style=flat-square" alt="versión">
+  <img src="https://img.shields.io/badge/versión-0.3.1-22b8ff?style=flat-square" alt="versión">
   <img src="https://img.shields.io/badge/plataforma-PS5-22b8ff?style=flat-square" alt="plataforma">
   <img src="https://img.shields.io/badge/probado-13.60%20%2B%20etaHEN-22b8ff?style=flat-square" alt="probado">
   <img src="https://img.shields.io/badge/licencia-GPL--3.0-22b8ff?style=flat-square" alt="licencia">
@@ -28,6 +28,7 @@
 - **App en el inicio** (Multimedia) para manejar todo con el control.
 - **Desde el celular o la PC**: abre `http://IP-del-PS5:9050` para subir videos y controlar todo.
 - **Luz del control**: el LED del DualSense sigue el color de tu fondo, o usa modos Fijo, Arcoíris, Respiración u Ola.
+- **Cualquier video**: si no es compatible (4K, HEVC, 60+ fps…), el botón **Convertir y aplicar** lo deja en 1080p desde el celular o la PC.
 - **Descargar desde un enlace**: pega el enlace de un .mp4 y el PS5 lo baja solo a tus fondos.
 - **Tus sitios de fondos**: agrega las páginas o repos que quieras; se guardan en el PS5.
 - **Música de fondo** en la página del celular/PC (fantasía oscura original, se apaga con un botón).

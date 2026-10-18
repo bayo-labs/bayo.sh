@@ -1,5 +1,14 @@
 # Cambios
 
+## v0.3.1 — 2026-10-17
+- **Convertir y aplicar**: sube cualquier video (4K, 60+ fps, HEVC, .mov, .mkv, .webm…) desde el
+  celular o la PC; si el PS5 no lo puede mostrar, la página lo convierte a 1080p H.264 ahí mismo
+  (ffmpeg.wasm, se descarga la primera vez) y lo sube y lo pone de fondo.
+- El PS5 revisa cada video (códec, tamaño y fps). Los que no puede mostrar llevan la etiqueta
+  "NO COMPATIBLE" con la razón y el botón Convertir y aplicar (en el celular o PC); al terminar se
+  borra el original.
+- Antes: un video 4K60 se quedaba en negro sin avisar.
+
 ## v0.3.0 — 2026-10-17 (primera versión pública)
 Reúne todas las betas de la v0.3:
 - Fondos animados en video en el inicio del PS5 y fondo propio por juego (o el original del juego).

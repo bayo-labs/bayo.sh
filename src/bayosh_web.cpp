@@ -152,7 +152,9 @@ std::string state_json() {
 		const std::string cover = v.path.substr(0, v.path.rfind('.')) + ".png";
 		const bool        thumb = stat(cover.c_str(), &ts) == 0 && ts.st_size >= kMinThumb;
 		j += "\"name\":" + json_str(v.name) + ",\"where\":" + json_str(v.where) + ",\"path\":" + json_str(v.path) +
-		     ",\"size\":" + std::to_string(size) + ",\"thumb\":" + (thumb ? "true" : "false") + ",\"color\":" + json_str(clip_color(v.path)) + "}";
+		     ",\"size\":" + std::to_string(size) + ",\"thumb\":" + (thumb ? "true" : "false") + ",\"color\":" + json_str(clip_color(v.path));
+		const Mp4Check mc = mp4_check(v.path);
+		j += std::string(",\"ok\":") + (mc.ok ? "true" : "false") + ",\"why\":" + json_str(mc.why) + "}";
 	}
 	return j + "]}";
 }

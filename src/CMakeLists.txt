@@ -28,7 +28,7 @@ target_link_directories(bayosh_shellui PUBLIC "${ONIONHEN_PS5_STUB_DIR}")
 target_link_libraries(bayosh_shellui PUBLIC onion_payload onion_proc onion_platform onion_detour SceNotification kernel_sys)
 onion_strip_debug(bayosh_shellui)
 
-add_executable(bayosh ${D_CWD}/bayosh_daemon.cpp ${D_CWD}/bayosh_web.cpp ${D_CWD}/bayosh_tile.cpp ${D_CWD}/bayosh_net.cpp)
+add_executable(bayosh ${D_CWD}/bayosh_daemon.cpp ${D_CWD}/bayosh_web.cpp ${D_CWD}/bayosh_tile.cpp ${D_CWD}/bayosh_net.cpp ${D_CWD}/bayosh_mp4.cpp)
 set_target_properties(bayosh PROPERTIES OUTPUT_NAME "bayosh.elf")
 target_link_options(bayosh PRIVATE "-Wl,--gc-sections")
 add_dependencies(bayosh bayosh_shellui NineS onion_proc onion_platform onion_elfldr)
