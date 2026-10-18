@@ -28,6 +28,7 @@
 #include <fcntl.h>
 #include <initializer_list>
 #include <pthread.h>
+#include <cerrno>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
@@ -36,6 +37,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <dirent.h>
 #include <ps5/kernel.h>
 
 #include <onion/detour.h>
@@ -55,6 +57,7 @@ int       sceKernelGetModuleInfo(int handle, void* info);
 int (*sceKernelMprotect)(void* addr, size_t len, int prot) = nullptr;
 bool has_hv_bypass = false;
 bool detour_no_kernel_fallback = false; // bayo.sh: no kernel_mprotect fallback inside ShellUI
+bool detour_exec_test = true;            // bayo.sh: detour runs a one-byte 'ret' in a trampoline slot first
 
 namespace {
 
@@ -3274,6 +3277,8 @@ int (*p_pad_handle)(int user, int type, int index)      = nullptr;
 int (*p_pad_light)(int handle, const PadLight* colour)  = nullptr;
 int (*p_pad_reset)(int handle)                           = nullptr;
 int (*p_fg_user)(int* user)                              = nullptr;
+int (*p_pad_init)()                                      = nullptr;
+int (*p_pad_open)(int user, int type, int index, const void* param) = nullptr;
 int (*p_login_users)(int* users)                         = nullptr;
 
 int pad_handle_now() {
@@ -3307,73 +3312,242 @@ int pad_handle_now() {
 			}
 		}
 	}
-	return -1;
+	// v0.2-beta10: ShellUI reads the controller another way and has no scePad session of its own
+	// (GetHandle -> 0x80920008). Open one here, only for the light bar; it is never read.
+	static int own = -1;
+	if (own > 0) {
+		return own;
+	}
+	if (p_pad_open != nullptr) {
+		const int ri = p_pad_init != nullptr ? p_pad_init() : -1;
+		for (int i = 0; i < 5 && own <= 0; ++i) {
+			if (users[i] <= 0 || users[i] == 0xff || (i > 0 && users[i] == users[0])) {
+				continue;
+			}
+			const int h = p_pad_open(users[i], 0, 0, nullptr);
+			wp_log("light bar: scePadInit %#x, scePadOpen(user %d) -> %#x", static_cast<unsigned>(ri), users[i],
+			       static_cast<unsigned>(h));
+			if (h > 0) {
+				own = h;
+			}
+		}
+	}
+	return own;
 }
 
-void light_tick() {
-	static char last[16] = {};
-	static bool applied  = false;
-	static bool warned   = false;
-	static int  beat     = 0;
-	static int  handle   = -1;
-	char want[16] = {};
-	if (FILE* f = fopen(kLightFile, "r")) {
-		if (fgets(want, sizeof(want), f) != nullptr) {
-			want[strcspn(want, "\r\n")] = 0;
-		}
-		fclose(f);
-	}
-	if (want[0] == 0) {
-		return;
-	}
-	const bool off     = strcmp(want, "off") == 0;
-	const bool changed = strcmp(want, last) != 0;
-	if (changed) {
-		wp_log("light bar: request %s", want);
-	}
-	// Same colour: send it again every ~3 s (the system may repaint the bar, e.g. after a game).
-	if (!changed && (off || ++beat < 10)) {
-		return;
-	}
-	beat = 0;
-	snprintf(last, sizeof(last), "%s", want);
-	if (off && !applied) {
-		return; // never touched the bar: leave the system's colour alone
-	}
-	if (p_pad_handle == nullptr || p_pad_light == nullptr) {
-		if (!warned) {
-			warned = true;
-			wp_log("light bar: libScePad symbols missing, option does nothing");
-		}
-		return;
-	}
-	if (handle < 0) {
-		handle = pad_handle_now();
-	}
-	if (handle < 0) {
-		if (changed) {
-			wp_log("light bar: no controller handle for %s", want);
-		}
-		return;
-	}
-	int rc;
-	if (off) {
-		rc      = p_pad_reset != nullptr ? p_pad_reset(handle) : -1;
-		applied = false;
+// v0.3: modes. light.txt (from the payload): "off" or "<solid|breathe|rainbow|wave> <speed> [RRGGBB ...]".
+// This thread animates it (~20 updates/s) and only talks to the pad when the colour changes,
+// plus a refresh every ~3 s (a game or the system may repaint the bar).
+struct LightReq {
+	char     mode[12] = "none";
+	int      speed    = 1;
+	int      n        = 0;
+	uint32_t c[8]     = {};
+};
+
+bool parse_light(const char* line, LightReq& r) {
+	LightReq out;
+	if (strcmp(line, "off") == 0) {
+		snprintf(out.mode, sizeof(out.mode), "off");
+	} else if (strlen(line) == 6) { // older payload: a bare colour
+		snprintf(out.mode, sizeof(out.mode), "solid");
+		out.c[0] = static_cast<uint32_t>(strtoul(line, nullptr, 16));
+		out.n    = 1;
 	} else {
-		unsigned int v = 0;
-		sscanf(want, "%6x", &v);
-		const PadLight c {static_cast<uint8_t>(v >> 16), static_cast<uint8_t>(v >> 8), static_cast<uint8_t>(v), 0};
-		rc      = p_pad_light(handle, &c);
-		applied = rc == 0;
+		char rest[160] = {};
+		if (sscanf(line, "%11s %d %159[^\n]", out.mode, &out.speed, rest) < 2) {
+			return false;
+		}
+		out.speed   = out.speed < 0 ? 0 : out.speed > 2 ? 2 : out.speed;
+		char* save  = nullptr;
+		for (char* tok = strtok_r(rest, " ", &save); tok != nullptr && out.n < 8; tok = strtok_r(nullptr, " ", &save)) {
+			out.c[out.n++] = static_cast<uint32_t>(strtoul(tok, nullptr, 16));
+		}
 	}
-	if (changed) {
-		wp_log("light bar %s: handle %#x rc %#x", want, static_cast<unsigned>(handle), static_cast<unsigned>(rc));
+	r = out;
+	return true;
+}
+
+uint32_t light_scale(uint32_t c, float k) {
+	const uint32_t r = static_cast<uint32_t>(((c >> 16) & 255) * k), g = static_cast<uint32_t>(((c >> 8) & 255) * k),
+	               b = static_cast<uint32_t>((c & 255) * k);
+	return (r << 16) | (g << 8) | b;
+}
+
+uint32_t light_mix(uint32_t a, uint32_t b, float t) {
+	auto ch = [&](int sh) {
+		const float x = ((a >> sh) & 255) * (1 - t) + ((b >> sh) & 255) * t;
+		return static_cast<uint32_t>(x) << sh;
+	};
+	return ch(16) | ch(8) | ch(0);
+}
+
+uint32_t light_hue(float h) { // h in [0,1): full saturation and brightness
+	const float x = h * 6;
+	const int   i = static_cast<int>(x) % 6;
+	const float f = x - static_cast<int>(x);
+	const uint32_t up = static_cast<uint32_t>(255 * f), dn = static_cast<uint32_t>(255 * (1 - f));
+	switch (i) {
+	case 0: return (255u << 16) | (up << 8);
+	case 1: return (dn << 16) | (255u << 8);
+	case 2: return (255u << 8) | up;
+	case 3: return (dn << 8) | 255u;
+	case 4: return (up << 16) | 255u;
+	default: return (255u << 16) | dn;
 	}
-	if (rc != 0) {
-		handle = -1; // controller changed or turned off: look the handle up again next time
-		last[0] = 0;
+}
+
+void* light_thread(void*) {
+	LightReq req;
+	char     seen[160] = {};
+	int      handle    = -1;
+	bool     applied   = false;
+	bool     told      = true;
+	uint32_t sent      = 0xffffffffu;
+	int      tick      = 0, refresh = 0, fails = 0;
+	for (;;) {
+		usleep(50 * 1000);
+		if (tick++ % 8 == 0) {
+			char line[160] = {};
+			if (FILE* f = fopen(kLightFile, "r")) {
+				if (fgets(line, sizeof(line), f) != nullptr) {
+					line[strcspn(line, "\r\n")] = 0;
+				}
+				fclose(f);
+			}
+			if (line[0] != 0 && strcmp(line, seen) != 0) {
+				snprintf(seen, sizeof(seen), "%s", line);
+				wp_log("light bar: request %s", line);
+				if (parse_light(line, req)) {
+					sent = 0xffffffffu;
+					told = false;
+					fails = 0;
+				}
+			}
+		}
+		if (strcmp(req.mode, "none") == 0 || p_pad_light == nullptr || (p_pad_handle == nullptr && p_pad_open == nullptr)) {
+			continue;
+		}
+		const bool off = strcmp(req.mode, "off") == 0;
+		if (off && !applied) {
+			continue; // never touched the bar: leave the system's colour alone
+		}
+		const long  ms  = now_ms();
+		const float per = req.speed == 0 ? 1.6f : req.speed == 2 ? 0.55f : 1.0f; // slow / normal / fast
+		uint32_t    col = req.n > 0 ? req.c[0] : 0x22b8ffu;
+		if (strcmp(req.mode, "rainbow") == 0) {
+			const float p = 8000 * per;
+			col = light_hue(static_cast<float>(ms % static_cast<long>(p)) / p);
+		} else if (strcmp(req.mode, "breathe") == 0) {
+			const float p = 3200 * per;
+			const float t = static_cast<float>(ms % static_cast<long>(p)) / p;
+			col = light_scale(col, 0.1f + 0.9f * (0.5f - 0.5f * cosf(6.2831853f * t)));
+		} else if (strcmp(req.mode, "wave") == 0 && req.n > 1) {
+			const float seg = 2600 * per;
+			const long  all = static_cast<long>(seg * req.n);
+			const float pos = static_cast<float>(ms % all) / seg;
+			const int   i   = static_cast<int>(pos);
+			const float f   = pos - i;
+			col = light_mix(req.c[i % req.n], req.c[(i + 1) % req.n], f < 0.6f ? 0 : (f - 0.6f) / 0.4f);
+		}
+		if (!off && col == sent && ++refresh < 60) {
+			continue;
+		}
+		refresh = 0;
+		if (handle < 0 && fails < 3) {
+			handle = pad_handle_now();
+		}
+		if (handle < 0) {
+			if (!told) {
+				told = true;
+				wp_log("light bar: no controller handle for %s", seen);
+			}
+			fails++;
+			continue;
+		}
+		int rc;
+		if (off) {
+			rc      = p_pad_reset != nullptr ? p_pad_reset(handle) : -1;
+			applied = false;
+		} else {
+			const PadLight pc {static_cast<uint8_t>(col >> 16), static_cast<uint8_t>(col >> 8), static_cast<uint8_t>(col), 0};
+			rc      = p_pad_light(handle, &pc);
+			applied = rc == 0;
+			sent    = col;
+		}
+		if (!told) {
+			told = true;
+			wp_log("light bar %s: handle %#x rc %#x", seen, static_cast<unsigned>(handle), static_cast<unsigned>(rc));
+		}
+		if (rc != 0) {
+			handle = -1; // controller changed or turned off: look it up again
+			sent   = 0xffffffffu;
+			fails  = 0;
+		}
 	}
+	return nullptr;
+}
+
+
+// v0.3-beta10: the bayo.sh window is a web app hosted by ShellUI itself (no process, no app id), so
+// only ShellUI can close it. Find out how: list classes about apps / web apps / deep links and their
+// close-like methods. Metadata only (nothing is called), once, on its own Mono-attached thread.
+
+void* close_probe_thread(void*) {
+	sleep(25);
+	mono_thread_attach(g_domain);
+	DIR* d = opendir("/system_ex/common_ex/lib");
+	if (d == nullptr) {
+		wp_log("closeapi: cannot list /system_ex/common_ex/lib");
+		return nullptr;
+	}
+	int lines = 0, dlls = 0;
+	while (dirent* e = readdir(d)) {
+		const char* f = e->d_name;
+		const size_t len = strlen(f);
+		if (len < 5 || strcasecmp(f + len - 4, ".dll") != 0 || !name_has(f, {"ShellUI", "Vsh"}) ||
+		    !name_has(f, {"AppSystem", "Web", "Browser", "Deeplink", "ShellApp", "Launch", "AppFramework", "Lnc"})) {
+			continue;
+		}
+		char path[256];
+		snprintf(path, sizeof(path), "/system_ex/common_ex/lib/%s", f);
+		Obj image = open_image(path);
+		if (image == nullptr || mono_image_get_table_rows == nullptr) {
+			continue;
+		}
+		++dlls;
+		const int rows = mono_image_get_table_rows(image, 2);
+		for (int i = 2; i <= rows && lines < 160; ++i) {
+			Obj         k  = mono_class_get(image, 0x02000000u | static_cast<uint32_t>(i));
+			const char* cn = k != nullptr ? mono_class_get_name(k) : nullptr;
+			if (cn == nullptr || !name_has(cn, {"WebApp", "Browser", "Deeplink", "DeepLink", "ShellApp", "AppManager", "Launch", "Lnc", "WebView", "Application", "AppInfo", "AppContext"})) {
+				continue;
+			}
+			char   line[1200];
+			size_t n    = 0;
+			void*  iter = nullptr;
+			while (Obj m = mono_class_get_methods(k, &iter)) {
+				const char* mn = mono_method_get_name(m);
+				if (mn == nullptr || !name_has(mn, {"Close", "Terminate", "Kill", "Exit", "Finish", "Quit", "Destroy", "Shutdown", "Stop", "Remove", "GoHome", "Suspend"})) {
+					continue;
+				}
+				const int w = snprintf(line + n, sizeof(line) - n, "%s ", mn);
+				if (w < 0 || n + static_cast<size_t>(w) >= sizeof(line)) {
+					break;
+				}
+				n += static_cast<size_t>(w);
+			}
+			if (n > 0) {
+				line[n] = 0;
+				wp_log("closeapi %s %s: %s", f, cn, line);
+				++lines;
+				usleep(20 * 1000); // let the log channel breathe
+			}
+		}
+	}
+	closedir(d);
+	wp_log("closeapi: done (%d assemblies, %d classes)", dlls, lines);
+	return nullptr;
 }
 
 void* wallpaper_thread(void*) {
@@ -3456,11 +3630,6 @@ void* wallpaper_thread(void*) {
 			}
 			fclose(f);
 		}
-		static int light_beat = 0;
-		if (++light_beat >= 1) { // every loop (~0.3 s); light_tick throttles itself
-			light_beat = 0;
-			light_tick();
-		}
 		if (FILE* f = fopen(kBlurFile, "r")) {
 			int blur = -1;
 			if (fscanf(f, "%d", &blur) == 1 && blur >= 0 && blur <= 2 && blur != g_blur_req.load()) {
@@ -3483,6 +3652,16 @@ void* wallpaper_thread(void*) {
 }
 
 } // namespace
+
+// Trace lines from the detour library (onionHEN patch) go to shellui.log.
+extern "C" void detour_trace(const char* fmt, ...) {
+	char    text[600];
+	va_list args;
+	va_start(args, fmt);
+	vsnprintf(text, sizeof(text), fmt, args);
+	va_end(args);
+	wp_log("%s", text);
+}
 
 // ---- entry point (called by the daemon's injector) -------------------------------------------
 
@@ -3522,6 +3701,8 @@ extern "C" int main(int argc, char const* argv[]) {
 		p_pad_light   = reinterpret_cast<int (*)(int, const PadLight*)>(rx_lookup("scePadSetLightBar"));
 		p_pad_reset   = reinterpret_cast<int (*)(int)>(rx_lookup("scePadResetLightBar"));
 		p_fg_user     = reinterpret_cast<int (*)(int*)>(rx_lookup("sceUserServiceGetForegroundUser"));
+		p_pad_init    = reinterpret_cast<int (*)()>(rx_lookup("scePadInit"));
+		p_pad_open    = reinterpret_cast<int (*)(int, int, int, const void*)>(rx_lookup("scePadOpen"));
 		p_login_users = reinterpret_cast<int (*)(int*)>(rx_lookup("sceUserServiceGetLoginUserIdList"));
 		wp_log("light bar symbols: handle %p set %p reset %p user %p", reinterpret_cast<void*>(p_pad_handle),
 		       reinterpret_cast<void*>(p_pad_light), reinterpret_cast<void*>(p_pad_reset), reinterpret_cast<void*>(p_fg_user));
@@ -3573,10 +3754,73 @@ extern "C" int main(int argc, char const* argv[]) {
 		return fail("bayo.sh could not start (Update not found)", 3);
 	}
 	g_step.store("InstallDetour(Application.Update)");
-	if (!InstallDetour(update_addr, reinterpret_cast<void*>(&Update_Hook),
-	                   reinterpret_cast<void**>(&g_update_orig)) ||
-	    g_update_orig == nullptr) {
-		return fail("bayo.sh could not start (hook failed)", 4);
+	// v0.2: the hook failed now and then on etaHEN 13.60 (test beta6: failed cleanly, nothing
+	// patched). A failed Prepare/Commit leaves the code untouched, so try again a few times,
+	// logging what we can see from here.
+	{
+		const uintptr_t page = static_cast<uintptr_t>(update_addr) & ~static_cast<uintptr_t>(0x3fff);
+		const int       mp   = sceKernelMprotect != nullptr
+		                           ? sceKernelMprotect(reinterpret_cast<void*>(page), 0x8000, 0x7)
+		                           : -1;
+		wp_log("hook: target %#lx align16 %d, page rwx rc %d (errno %d)", static_cast<unsigned long>(update_addr),
+		       static_cast<int>(update_addr % 16), mp, mp == 0 ? 0 : errno);
+	}
+	bool hooked = false;
+	// Another ShellUI mod may already have hooked Application.Update with "jmp [rip+0]; .quad dest"
+	// (ff 25 00 00 00 00 + 8-byte address; test beta8). A normal detour copies that rip-relative
+	// jump into our trampoline, where it then reads OUR new pointer: Update_Hook calls itself
+	// forever and ShellUI freezes. Instead, chain: call their hook as "original", and swap only
+	// the 8-byte destination, atomically.
+	{
+		const volatile uint8_t* t = reinterpret_cast<const volatile uint8_t*>(update_addr);
+		if (t[0] == 0xff && t[1] == 0x25 && t[2] == 0 && t[3] == 0 && t[4] == 0 && t[5] == 0) {
+			alignas(16) uint8_t cur[16];
+			for (int i = 0; i < 16; ++i) {
+				cur[i] = t[i];
+			}
+			uint64_t prev = 0;
+			memcpy(&prev, cur + 6, 8);
+			wp_log("hook: Update already hooked by another module (-> %#lx), chaining to it",
+			       static_cast<unsigned long>(prev));
+			if (prev != 0 && prev != reinterpret_cast<uint64_t>(&Update_Hook)) {
+				alignas(16) uint8_t want[16];
+				memcpy(want, cur, 16);
+				const uint64_t mine = reinterpret_cast<uint64_t>(&Update_Hook);
+				memcpy(want + 6, &mine, 8);
+				uint64_t lo_e, hi_e, lo_d, hi_d;
+				memcpy(&lo_e, cur, 8);
+				memcpy(&hi_e, cur + 8, 8);
+				memcpy(&lo_d, want, 8);
+				memcpy(&hi_d, want + 8, 8);
+				g_update_orig = reinterpret_cast<UpdateFn>(prev); // set before the swap: the UI thread may enter at once
+				unsigned char ok = 0;
+				__asm__ volatile("lock; cmpxchg16b %1; sete %0"
+				                 : "=q"(ok), "+m"(*reinterpret_cast<volatile __int128*>(update_addr)), "+a"(lo_e), "+d"(hi_e)
+				                 : "b"(lo_d), "c"(hi_d)
+				                 : "cc", "memory");
+				hooked = ok != 0;
+				wp_log("hook: chained -> %s", hooked ? "ok" : "failed (changed meanwhile)");
+				if (!hooked) {
+					g_update_orig = nullptr;
+				}
+			}
+			if (!hooked) {
+				return fail("bayo.sh no pudo engancharse al menú (otro mod ya lo usa). Cierra y vuelve a lanzarlo.", 4);
+			}
+		}
+	}
+	for (int attempt = 1; attempt <= 6 && !hooked; ++attempt) {
+		g_update_orig = nullptr;
+		hooked = InstallDetour(update_addr, reinterpret_cast<void*>(&Update_Hook),
+		                       reinterpret_cast<void**>(&g_update_orig)) &&
+		         g_update_orig != nullptr;
+		wp_log("hook: attempt %d -> %s", attempt, hooked ? "ok" : "failed");
+		if (!hooked) {
+			usleep(400 * 1000);
+		}
+	}
+	if (!hooked) {
+		return fail("bayo.sh no pudo engancharse al menú. Cierra y vuelve a lanzarlo.", 4);
 	}
 	wp_log("PUI.Application.Update hooked");
 	g_step.store("hooked, waiting for UI ticks");
@@ -3590,6 +3834,16 @@ extern "C" int main(int argc, char const* argv[]) {
 		pthread_detach(thread);
 	} else {
 		wp_log("wallpaper_thread start failed");
+	}
+	pthread_t pthread_probe;
+	if (pthread_create(&pthread_probe, nullptr, close_probe_thread, nullptr) == 0) {
+		pthread_detach(pthread_probe);
+	}
+	pthread_t lthread;
+	if (pthread_create(&lthread, nullptr, light_thread, nullptr) == 0) {
+		pthread_detach(lthread);
+	} else {
+		wp_log("light_thread start failed");
 	}
 	wp_log("init done");
 

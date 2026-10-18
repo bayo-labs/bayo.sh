@@ -231,6 +231,15 @@ int install_tile() {
 	if (rc != 0) {
 		return -1;
 	}
+	// v0.3: refresh the icon the home screen caches, so a new icon shows without reinstalling.
+	{
+		const std::string meta = std::string("/user/appmeta/") + kTitleId;
+		if (access(meta.c_str(), F_OK) == 0) {
+			const int m = put_file(meta + "/icon0.png", bayosh_icon_png,
+			                       static_cast<size_t>(bayosh_icon_png_end - bayosh_icon_png));
+			log("tile: appmeta icon %s", m < 0 ? "not updated" : "updated");
+		}
+	}
 	if (first) {
 		const int fd = open(kTileMarker, O_WRONLY | O_CREAT | O_TRUNC, 0666);
 		if (fd >= 0) {

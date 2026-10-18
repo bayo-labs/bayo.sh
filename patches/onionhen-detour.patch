@@ -1,16 +1,24 @@
 diff --git a/source/libonion_detour/source/detour.cpp b/source/libonion_detour/source/detour.cpp
-index 20b7f86..8f56e4f 100644
+index 20b7f86..9053f90 100644
 --- a/source/libonion_detour/source/detour.cpp
 +++ b/source/libonion_detour/source/detour.cpp
-@@ -45,6 +45,7 @@ extern int (*sceKernelMprotect)(void *addr, size_t len, int prot)
+@@ -45,6 +45,15 @@ extern int (*sceKernelMprotect)(void *addr, size_t len, int prot)
  
  // Optional: host sets true when userland mprotect works (kstuff HV path).
  extern bool has_hv_bypass __attribute__((weak));
 +extern bool detour_no_kernel_fallback __attribute__((weak));
++/* bayo.sh: optional trace into the host's log, and a one-time execute test of a trampoline slot. */
++extern "C" void detour_trace(const char *fmt, ...) __attribute__((weak));
++extern bool detour_exec_test __attribute__((weak));
++#define BAYO_TRACE(...)                                                        \
++  do {                                                                         \
++    if (&detour_trace != nullptr)                                              \
++      detour_trace(__VA_ARGS__);                                               \
++  } while (0)
  
  namespace {
  
-@@ -90,6 +91,10 @@ int mprotect_rwx(void *addr, size_t len) {
+@@ -90,6 +99,10 @@ int mprotect_rwx(void *addr, size_t len) {
    } else if (mprotect_user(addr, len) >= 0) {
      return 0;
    }
@@ -21,3 +29,69 @@ index 20b7f86..8f56e4f 100644
    return kernel_mprotect(getpid(), reinterpret_cast<uint64_t>(addr), len,
                           kProtRwx);
  }
+@@ -165,8 +178,25 @@ bool PrepareDetour(uint64_t address, void *destination, DetourHandle *handle) {
+       g_trampoline_arena.allocate_near(stubLength, address);
+   if (!executableAddress) {
+     LOG_DEBUG("DetourFunction: no unique near trampoline for %#02lx", address);
++    BAYO_TRACE("detour: no near trampoline for %#lx", (unsigned long)address);
+     return false;
+   }
++  BAYO_TRACE("detour: target %#lx trampoline %p (distance %ld MB)", (unsigned long)address,
++             executableAddress,
++             (long)(((intptr_t)executableAddress - (intptr_t)address) / (1024 * 1024)));
++  static bool exec_tested = false;
++  if (!exec_tested && &detour_exec_test != nullptr && detour_exec_test) {
++    void *probe = g_trampoline_arena.allocate_near(16, address);
++    if (!probe) {
++      BAYO_TRACE("detour: exec test: no slot");
++      return false;
++    }
++    *static_cast<volatile uint8_t *>(probe) = 0xC3; /* ret */
++    BAYO_TRACE("detour: exec test at %p (if the log stops here, slots are not executable)", probe);
++    reinterpret_cast<void (*)()>(probe)();
++    BAYO_TRACE("detour: exec test ok");
++    exec_tested = true;
++  }
+   if (!g_trampoline_arena.owns(executableAddress)) {
+     LOG_DEBUG("DetourFunction: allocator returned an unowned trampoline");
+     return false;
+@@ -175,8 +205,14 @@ bool PrepareDetour(uint64_t address, void *destination, DetourHandle *handle) {
+   /* PS5 xotext is execute-only. Never decode/copy it before this succeeds. */
+   if (mprotect_range_rwx(address, kRelocationReadLength) < 0) {
+     LOG_ERROR("DetourFunction: failed to mprotect target decoder window");
++    BAYO_TRACE("detour: mprotect of the target window failed");
+     return false;
+   }
++  {
++    const uint8_t *b = reinterpret_cast<const uint8_t *>(address);
++    BAYO_TRACE("detour: target bytes %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
++               b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]);
++  }
+ 
+   onion_x64_relocate_result relocation{};
+   if (!onion_x64_relocate(
+@@ -187,6 +223,8 @@ bool PrepareDetour(uint64_t address, void *destination, DetourHandle *handle) {
+     LOG_ERROR("DetourFunction: relocation failed at +%zu: %s",
+                 relocation.error_offset,
+                 onion_x64_relocate_error_string(relocation.error));
++    BAYO_TRACE("detour: relocation failed at +%zu: %s", relocation.error_offset,
++               onion_x64_relocate_error_string(relocation.error));
+     return false;
+   }
+ 
+@@ -206,6 +244,7 @@ bool PrepareDetour(uint64_t address, void *destination, DetourHandle *handle) {
+   handle->emitted_size = relocation.trampoline_size;
+   handle->patch = patch;
+   handle->prepared = true;
++  BAYO_TRACE("detour: prepared, stolen %zu emitted %zu", handle->stolen_size, handle->emitted_size);
+   return true;
+ }
+ 
+@@ -217,6 +256,7 @@ bool CommitDetour(DetourHandle *handle) {
+   if (!compare_exchange_patch(handle->target, handle->patch)) {
+     LOG_ERROR("CommitDetour: target changed or atomic patch failed: %#02lx",
+                 handle->target);
++    BAYO_TRACE("detour: commit failed (target changed or not 16-byte writable)");
+     return false;
+   }
+ 

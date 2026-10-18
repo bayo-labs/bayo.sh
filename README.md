@@ -7,7 +7,7 @@
 <p align="center"><b>Fondos de pantalla animados en video para el inicio de tu PS5.</b></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/versión-0.2--beta-22b8ff?style=flat-square" alt="versión">
+  <img src="https://img.shields.io/badge/versión-0.3.0-22b8ff?style=flat-square" alt="versión">
   <img src="https://img.shields.io/badge/plataforma-PS5-22b8ff?style=flat-square" alt="plataforma">
   <img src="https://img.shields.io/badge/probado-13.60%20%2B%20etaHEN-22b8ff?style=flat-square" alt="probado">
   <img src="https://img.shields.io/badge/licencia-GPL--3.0-22b8ff?style=flat-square" alt="licencia">
@@ -27,8 +27,12 @@
 - **Reposo**: regresa solo al despertar la consola.
 - **App en el inicio** (Multimedia) para manejar todo con el control.
 - **Desde el celular o la PC**: abre `http://IP-del-PS5:9050` para subir videos y controlar todo.
-- **Luz del control** (experimental): el LED del DualSense toma el color de tu fondo.
+- **Luz del control**: el LED del DualSense sigue el color de tu fondo, o usa modos Fijo, Arcoíris, Respiración u Ola.
+- **Descargar desde un enlace**: pega el enlace de un .mp4 y el PS5 lo baja solo a tus fondos.
+- **Tus sitios de fondos**: agrega las páginas o repos que quieras; se guardan en el PS5.
+- **Música de fondo** en la página del celular/PC (fantasía oscura original, se apaga con un botón).
 - **Guía de primer uso** dentro de la app.
+- **10 idiomas**: español, English, Português, Français, Deutsch, Italiano, 日本語, 한국어, 中文, Русский.
 - **Compatible con etaHEN** en firmware 13.60: no le cambia permisos al menú ni lee el kernel desde dentro, y si algo falla se detiene solo en vez de tumbar la consola.
 
 ## Instalación

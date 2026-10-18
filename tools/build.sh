@@ -20,7 +20,7 @@ DEST="$TREE/source/bayosh"
 [ -x "$SDK/bin/prospero-cmake" ] || { echo "No encuentro el SDK en $SDK"; exit 1; }
 
 # Parche de bayo.sh para la librería de detours (compatibilidad con etaHEN 13.60).
-if ! grep -q detour_no_kernel_fallback "$TREE/source/libonion_detour/source/detour.cpp"; then
+if ! grep -q detour_trace "$TREE/source/libonion_detour/source/detour.cpp"; then
 	git -C "$TREE" apply "$HERE/patches/onionhen-detour.patch"
 fi
 # Solo hacen falta las librerías de OnionHEN, no sus payloads.

@@ -43,6 +43,9 @@ struct State {
 	bool               light      = false; // controller light bar follows the video's colour (experimental)
 	bool               guided     = false; // the first-run guide was shown
 	std::string        light_now;          // colour sent to the light bar right now (RRGGBB or "off")
+	std::string        light_mode = "follow"; // follow, fixed, rainbow, breathe, wave
+	std::string        light_fix  = "22b8ff"; // colour for fixed / breathe
+	int                light_speed = 1;        // 0 slow, 1 normal, 2 fast
 	std::string        game;               // title id of the running game ("" = none)
 	std::string        current;  // real path of the chosen clip ("" = none)
 	std::string        status;   // ShellUI status line: playing / stopped / failed / starting
@@ -68,9 +71,17 @@ std::string clip_color(const std::string& path);
 bool        set_clip_color(const std::string& path, const std::string& rgb);
 bool        guide_done();
 void        set_guide_done(bool done);
+bool        set_light_mode(const std::string& mode, const std::string& rgb, int speed);
 void        light_step();
 bool reset_settings(std::string& error);
-void request_shutdown(); // same as the stop port: payload ends, ShellUI restarts clean
+void request_shutdown(bool full = false);
+bool menu_mods_present(); // another ShellUI mod (OnionHEN-style) is running: restarting the menu is unsafe
+// bayosh_net.cpp
+bool        start_download(const std::string& url, std::string& error);
+void        cancel_download();
+std::string download_json(); // "null" or {active,done,name,got,total,error}
+bool        open_browser(const std::string& url);
+void        go_home(); // same as the stop port: payload ends, ShellUI restarts clean
 void* game_thread(void*);
 // Per-game backgrounds (v1.1)
 std::string games_text();                                          // games.txt contents

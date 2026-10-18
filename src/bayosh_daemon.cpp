@@ -15,6 +15,8 @@
  *   /system_tmp/bayosh/status.txt  what ShellUI is doing: playing <path> / stopped / failed <rc>
  */
 #include "bayosh.hpp"
+#include <sys/user.h>
+#include <sys/sysctl.h>
 
 #include <algorithm>
 #include <map>
@@ -117,6 +119,9 @@ bool        g_store_only = false; // video only while the PS Store tile is highl
 bool        g_parallax   = false; // nudge the video when moving between home tiles
 bool        g_light      = false; // controller light bar follows the clip's colour (experimental, off by default)
 std::string g_light_now  = "off"; // last value written to kLightFile
+std::string g_light_mode = "follow"; // follow | fixed | rainbow | breathe | wave
+std::string g_light_fix  = "22b8ff";
+int         g_light_speed = 1;
 bool        g_game_running = false;
 std::string g_game_title;
 std::string g_override;     // per-game clip playing instead of g_current ("" = main wallpaper)
@@ -128,12 +133,17 @@ bool        g_injected = false; // the ShellUI module is running (it reacts to t
 // ---- small file helpers ----------------------------------------------------------------------
 
 bool write_text(const char* path, const std::string& text) {
-	const int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+	// beta10: /system_tmp is often full (errno 28). Truncating first frees the page and the write
+	// then needs a new one; overwriting in place and shrinking afterwards needs no new space.
+	const int fd = open(path, O_WRONLY | O_CREAT, 0666);
 	if (fd < 0) {
 		return false;
 	}
-	const bool ok = write(fd, text.data(), text.size()) == static_cast<ssize_t>(text.size());
+	const bool ok = pwrite(fd, text.data(), text.size(), 0) == static_cast<ssize_t>(text.size()) &&
+	                ftruncate(fd, static_cast<off_t>(text.size())) == 0;
+	const int err = errno;
 	close(fd);
+	errno = err;
 	return ok;
 }
 
@@ -327,11 +337,11 @@ void unmount_window_everywhere() {
 }
 
 // Like OnionHEN's shutdown: end SceShellUI so the system starts a clean one (no module, no video).
-void restart_shellui() {
+bool restart_shellui() {
 	const pid_t pid = onion_find_pid("SceShellUI");
 	if (pid <= 1) {
 		log("restart: SceShellUI not found");
-		return;
+		return false;
 	}
 	constexpr uintptr_t kDecidAuthId = 0x4800000000000022ULL; // needed for sceKernelTerminateProcess
 	const uintptr_t     old          = set_proc_authid(getpid(), kDecidAuthId);
@@ -342,7 +352,18 @@ void restart_shellui() {
 		log("restart: TerminateProcess(%d) rc %d ret %d, SIGKILL instead", static_cast<int>(pid), rc, ret);
 		kill(pid, SIGKILL);
 	}
-	log("restart: SceShellUI %d ended, the system starts a new one", static_cast<int>(pid));
+	// v0.3: make sure it really went (beta4: it did not, the old module stayed inside, and the next
+	// start injected a second one on top: frozen menu).
+	for (int i = 0; i < 60; ++i) {
+		usleep(100 * 1000);
+		const pid_t now = onion_find_pid("SceShellUI");
+		if (now != pid) {
+			log("restart: SceShellUI %d ended (now %d)", static_cast<int>(pid), static_cast<int>(now));
+			return true;
+		}
+	}
+	log("restart: SceShellUI %d is STILL running after 6 s", static_cast<int>(pid));
+	return false;
 }
 
 // ---- config ----------------------------------------------------------------------------------
@@ -393,6 +414,12 @@ void load_config() {
 			g_game_pause = line.substr(10) != "0";
 		} else if (line.rfind("light=", 0) == 0) {
 			g_light = line.substr(6) != "0";
+		} else if (line.rfind("lightmode=", 0) == 0) {
+			g_light_mode = line.substr(10);
+		} else if (line.rfind("lightfix=", 0) == 0) {
+			g_light_fix = line.substr(9);
+		} else if (line.rfind("lightspeed=", 0) == 0) {
+			g_light_speed = std::max(0, std::min(2, atoi(line.c_str() + 11)));
 		}
 		if (end == std::string::npos) {
 			break;
@@ -412,7 +439,7 @@ void load_config() {
 
 void save_config() {
 	write_text(kConfigFile, std::string("enabled=") + (g_enabled ? "1" : "0") + "\nvideo=" + g_current + "\ndim=" + std::to_string(g_dim) + "\nvolume=" + std::to_string(g_volume) + "\nblur=" + std::to_string(g_blur) + "\nlooks=" + looks_text() +
-	                            "\nshuffle=" + (g_shuffle ? "1" : "0") + "\nmainvideo=" + (g_main_video ? "1" : "0") + "\ngamevideos=" + (g_game_videos ? "1" : "0") + "\ngamepause=" + (g_game_pause ? "1" : "0") + "\nmenuhide=" + (g_menu_hide ? "1" : "0") + "\nstoreonly=" + (g_store_only ? "1" : "0") + "\nparallax=" + (g_parallax ? "1" : "0") + "\nlight=" + (g_light ? "1" : "0") + "\n");
+	                            "\nshuffle=" + (g_shuffle ? "1" : "0") + "\nmainvideo=" + (g_main_video ? "1" : "0") + "\ngamevideos=" + (g_game_videos ? "1" : "0") + "\ngamepause=" + (g_game_pause ? "1" : "0") + "\nmenuhide=" + (g_menu_hide ? "1" : "0") + "\nstoreonly=" + (g_store_only ? "1" : "0") + "\nparallax=" + (g_parallax ? "1" : "0") + "\nlight=" + (g_light ? "1" : "0") + "\nlightmode=" + g_light_mode + "\nlightfix=" + g_light_fix + "\nlightspeed=" + std::to_string(g_light_speed) + "\n");
 }
 
 // ---- telling ShellUI what to play ------------------------------------------------------------
@@ -801,7 +828,7 @@ void* send_symbols_thread(void* arg) {
 	uint32_t pad = 0xffffffffu, us = 0xffffffffu;
 	kernel_dynlib_handle(pid, "libScePad.sprx", &pad);
 	kernel_dynlib_handle(pid, "libSceUserService.sprx", &us);
-	for (const char* name : {"scePadGetHandle", "scePadSetLightBar", "scePadResetLightBar"}) {
+	for (const char* name : {"scePadGetHandle", "scePadSetLightBar", "scePadResetLightBar", "scePadInit", "scePadOpen"}) {
 		const unsigned long a = pad != 0xffffffffu ? kernel_dynlib_dlsym(pid, pad, name) : 0;
 		if (a != 0) {
 			snprintf(line, sizeof(line), "%s %lx\n", name, a);
@@ -861,6 +888,18 @@ pid_t inject_shellui() {
 		return pid;
 	}
 	wait_shellui_ready(pid);
+	// v0.3: a bayo.sh module from an earlier start may still live in this ShellUI (marker lost). It
+	// reports its status every ~2 s on our channel: if anything arrives, do not inject a second one.
+	const long heard0 = g_ui_bytes; // only what arrives now counts (a module of an older, dead ShellUI is silent)
+	for (int i = 0; i < 30 && g_ui_bytes == heard0; ++i) {
+		usleep(100 * 1000);
+	}
+	if (g_ui_bytes != heard0) {
+		log("a bayo.sh module is already inside ShellUI pid %d (it is talking on our channel): NOT injecting again",
+		    static_cast<int>(pid));
+		notify("Ya hay una bayo.sh dentro del menú. Reinicia la consola para cargar esta versión.");
+		return -1;
+	}
 	unlink(kStatusFile);
 	ui_forget_status();
 	log("injecting into SceShellUI pid %d", static_cast<int>(pid));
@@ -1283,6 +1322,9 @@ State get_state() {
 		st.parallax   = g_parallax;
 		st.light      = g_light;
 		st.light_now  = g_light_now;
+		st.light_mode = g_light_mode;
+		st.light_fix  = g_light_fix;
+		st.light_speed = g_light_speed;
 		st.game       = g_game_running ? g_game_title : std::string();
 	}
 	st.status = shellui_status();
@@ -1474,6 +1516,9 @@ bool reset_settings(std::string& error) {
 	g_parallax   = false;
 	write_text(kParallaxFile, "0\n");
 	g_light      = false;
+	g_light_mode = "follow";
+	g_light_fix  = "22b8ff";
+	g_light_speed = 1;
 	write_text(kMenusFile, "1\n");
 	if (g_current.empty() || !exists(g_current.c_str())) {
 		const std::vector<Video> videos = list_videos();
@@ -1486,9 +1531,85 @@ bool reset_settings(std::string& error) {
 	return apply_locked(error);
 }
 
-void request_shutdown() {
-	log("shutdown requested from the window");
+// v0.3: the app's own window (the home-screen tile BYSH00001) closes with the engine.
+// sceLncUtilGetAppId("BYSH00001") does not find a web-app tile (test v0.3-beta4: window stayed), so
+// look for the process that runs it: the one whose app info carries our title id.
+extern "C" int sceLncUtilGetAppId(const char* title_id);
+extern "C" int sceLncUtilKillApp(int app_id);
+struct BayoAppInfo {
+	uint32_t app_id;
+	uint64_t unknown1;
+	uint32_t app_type;
+	char     title_id[10];
+	char     unknown2[0x3c];
+};
+extern "C" int sceKernelGetAppInfo(pid_t pid, BayoAppInfo* info);
+
+void close_app_window() {
+	int closed = 0;
+	const int byid = sceLncUtilGetAppId("BYSH00001");
+	if (byid > 0) {
+		log("app window: appId %#x by title, kill rc %#x", static_cast<unsigned>(byid),
+		    static_cast<unsigned>(sceLncUtilKillApp(byid)));
+		++closed;
+	}
+	int    mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PROC, 0};
+	size_t size   = 0;
+	if (sysctl(mib, 4, nullptr, &size, nullptr, 0) != 0 || size == 0) {
+		log("app window: process list unavailable (errno %d)", errno);
+		return;
+	}
+	std::string buf(size + 4096, '\0');
+	size = buf.size();
+	if (sysctl(mib, 4, &buf[0], &size, nullptr, 0) != 0) {
+		log("app window: process list unavailable (errno %d)", errno);
+		return;
+	}
+	std::string seen;
+	for (size_t off = 0; off + sizeof(int) <= size;) {
+		const auto* ki = reinterpret_cast<const kinfo_proc*>(buf.data() + off);
+		if (ki->ki_structsize <= 0) {
+			break;
+		}
+		off += static_cast<size_t>(ki->ki_structsize);
+		BayoAppInfo info {};
+		if (sceKernelGetAppInfo(ki->ki_pid, &info) != 0) {
+			continue;
+		}
+		char tid[11] = {};
+		memcpy(tid, info.title_id, 10);
+		if (tid[0] != 0 && seen.size() < 900) {
+			seen += std::string(ki->ki_comm) + "(" + tid + ") ";
+		}
+		if (strncmp(tid, "BYSH00001", 9) == 0 && ki->ki_pid != getpid()) {
+			const int rc = info.app_id != 0 ? sceLncUtilKillApp(static_cast<int>(info.app_id)) : -1;
+			log("app window: %s pid %d appId %#x -> kill rc %#x", ki->ki_comm, static_cast<int>(ki->ki_pid), info.app_id,
+			    static_cast<unsigned>(rc));
+			if (rc != 0) {
+				kill(ki->ki_pid, SIGKILL); // our own window's process only
+				log("app window: pid %d sent SIGKILL", static_cast<int>(ki->ki_pid));
+			}
+			++closed;
+		}
+	}
+	if (closed == 0) {
+		log("app window: not found. Apps running: %s", seen.c_str());
+	}
+}
+
+bool menu_mods_present() {
+	return onion_daemon_answers();
+}
+
+volatile bool g_full_close = false; // v0.3: "Cerrar y reiniciar el menú" — skip the soft stop
+
+void request_shutdown(bool full) {
+	log("shutdown requested from the window (%s)", full ? "full: restart the menu" : "quick");
+	g_full_close     = full;
 	g_stop_requested = true;
+	if (!full) {
+		go_home(); // leave the window right away; the engine winds down behind the home screen
+	}
 	g_running        = false;
 }
 
@@ -1860,6 +1981,29 @@ void set_guide_done(bool done) {
 }
 
 // Called every 0.2 s from focus_thread (a loop that is known to run): no thread of its own.
+bool set_light_mode(const std::string& mode, const std::string& rgb, int speed) {
+	static const char* const kModes[] = {"follow", "fixed", "rainbow", "breathe", "wave"};
+	bool known = false;
+	for (const char* m : kModes) {
+		known = known || mode == m;
+	}
+	if (!known) {
+		return false;
+	}
+	std::lock_guard<std::mutex> lock(g_ctl);
+	g_light_mode  = mode;
+	if (is_rgb(rgb)) {
+		g_light_fix = rgb;
+	}
+	g_light_speed = std::max(0, std::min(2, speed));
+	save_config();
+	log("light bar: mode %s, colour %s, speed %d", g_light_mode.c_str(), g_light_fix.c_str(), g_light_speed);
+	return true;
+}
+
+// Called every 0.2 s from focus_thread (a loop that is known to run): no thread of its own.
+// light.txt for ShellUI: "off", or "<solid|breathe|rainbow|wave> <speed 0-2> [RRGGBB ...]".
+// ShellUI animates it itself (bayosh_shellui.cpp, light_thread).
 void light_step() {
 	static std::string last;
 	static int         fails = 0;
@@ -1870,8 +2014,32 @@ void light_step() {
 		if (g_light && g_enabled && g_injected && !g_game_running) {
 			const std::string clip = g_store_only ? store_clip() : (!g_override.empty() ? g_override : g_current);
 			const std::string c    = clip.empty() || clip == "off" ? std::string() : clip_color(clip);
-			if (!c.empty()) {
-				want = c;
+			const std::string sp   = std::to_string(g_light_speed);
+			if (g_light_mode == "fixed") {
+				want = "solid " + sp + " " + g_light_fix;
+			} else if (g_light_mode == "rainbow") {
+				want = "rainbow " + sp;
+			} else if (g_light_mode == "breathe") {
+				want = "breathe " + sp + " " + g_light_fix; // the colour picked in the app
+			} else if (g_light_mode == "wave") {
+				std::string list;
+				int         n = 0;
+				for (const Video& v : list_videos()) {
+					const std::string vc = clip_color(v.path);
+					if (!vc.empty() && list.find(vc) == std::string::npos && n < 6) {
+						list += " " + vc;
+						++n;
+					}
+				}
+				for (const char* d : {"ff3d9a", "22b8ff", "7cff00"}) {
+					if (n < 3 && list.find(d) == std::string::npos) {
+						list += std::string(" ") + d;
+						++n;
+					}
+				}
+				want = "wave " + sp + list;
+			} else if (!c.empty()) {
+				want = "solid " + sp + " " + c;
 			} else if (!said) {
 				said = true;
 				log("light bar: no colour for '%s' yet (open bayo.sh on a phone or pick one)", clip.c_str());
@@ -1884,7 +2052,7 @@ void light_step() {
 		if (!g_light) {
 			said = false;
 		}
-		g_light_now = want;
+		g_light_now = want.rfind("solid ", 0) == 0 ? want.substr(want.size() - 6) : want == "off" ? "off" : g_light_mode;
 	}
 	if (want == last) {
 		return;
@@ -1910,7 +2078,7 @@ int main() {
 	// off until the next reboot.
 	unlink("/system_tmp/bayosh/video_trying");
 	g_log = open(kLogFile, O_WRONLY | O_CREAT | O_TRUNC, 0666);
-	log("bayo.sh v0.0.10 starting");
+	log("bayo.sh v0.3.0 starting");
 	if (take_over_running()) {
 		log("handover: took over from the bayo.sh that was running");
 	}
@@ -2037,11 +2205,27 @@ int main() {
 	}
 
 	copy_shellui_log();
+	if (g_stop_requested) {
+		// v0.3: the controller light goes back to the system's colour before we leave (the module's
+		// light thread reads light.txt every ~0.4 s).
+		write_text(kLightFile, "off\n");
+		usleep(1500 * 1000);
+		close_app_window(); // "Cerrar": the window goes too when it is an app of its own
+	}
 	// With OnionHEN running, restarting ShellUI would take OnionHEN's toolbox down too. Soft stop
 	// instead: video off, looks off, folder unmounted; the idle module stays parked in ShellUI and
 	// the next start reuses it (the marker stays, so no second injection).
 	const pid_t ui    = onion_find_pid("SceShellUI");
-	const bool  onion = onion_daemon_answers() || (ui > 0 && read_pid_file(kOnionToolbox) == ui);
+	const bool  onion_d = onion_daemon_answers();
+	const bool  onion_t = ui > 0 && read_pid_file(kOnionToolbox) == ui;
+	const bool  onion   = onion_d || onion_t;
+	if (g_stop_requested) {
+		log("stop: onion daemon=%d toolbox=%d full=%d", onion_d ? 1 : 0, onion_t ? 1 : 0, g_full_close ? 1 : 0);
+	}
+	if (g_stop_requested && onion && g_full_close) {
+		// beta8 test: killing the menu with OnionHEN inside froze the console. Never again.
+		log("stop: full close refused, another menu mod is running");
+	}
 	if (g_stop_requested && onion) {
 		write_text(kDimFile, "0\n");
 		write_text(kBlurFile, "0\n");
@@ -2052,17 +2236,25 @@ int main() {
 			log("soft stop: ShellUI still holds the video (%s)", shellui_status().c_str());
 		}
 		unmount_window_everywhere();
+		go_home(); // the window belongs to the menu: at least leave it and show the home screen
 		log("bayo.sh stopped (soft: OnionHEN keeps running, the idle module stays in ShellUI)");
 		notify("bayo.sh se cerró.");
 		return 0;
 	}
 	write_text(kPathFile, "off\n");
+	bool fresh_ui = true;
 	if (g_stop_requested) {
-		restart_shellui();
+		fresh_ui = restart_shellui();
 		sleep(2);
 	}
 	unmount_window_everywhere();
-	unlink(kOurMarker);
+	if (fresh_ui) {
+		unlink(kOurMarker);
+	} else {
+		// The module is still parked in this ShellUI: keep the marker so a new start does not inject twice.
+		log("bayo.sh stopped, but the menu did not restart: restart the console before starting it again");
+		notify("bayo.sh se apagó, pero el menú no se reinició. Reinicia la consola antes de volver a lanzarlo.");
+	}
 	unlink(kStatusFile);
 	ui_forget_status();
 	log("bayo.sh stopped");

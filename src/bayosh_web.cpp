@@ -38,6 +38,8 @@ extern const uint8_t bayosh_icon_png[];
 extern const uint8_t bayosh_icon_png_end[];
 extern const uint8_t bayosh_page_html[];
 extern const uint8_t bayosh_page_html_end[];
+extern const uint8_t bayosh_music_mp4[];
+extern const uint8_t bayosh_music_mp4_end[];
 extern const uint8_t bayosh_remote_html[];
 extern const uint8_t bayosh_remote_html_end[];
 }
@@ -49,6 +51,17 @@ __asm__(".section .rodata\n"
         "bayosh_page_html:\n"
         ".incbin \"" BAYOSH_PAGE_HTML "\"\n"
         "bayosh_page_html_end:\n"
+        ".previous\n");
+
+// v0.3: the app's background music (original piece, AAC) inside a tiny black H.264 video: the PS5
+// browser refuses audio-only media (NotSupportedError) and Web Audio synthesis, but plays videos.
+__asm__(".section .rodata\n"
+        ".global bayosh_music_mp4\n"
+        ".global bayosh_music_mp4_end\n"
+        ".align  16\n"
+        "bayosh_music_mp4:\n"
+        ".incbin \"" BAYOSH_MUSIC_MP4 "\"\n"
+        "bayosh_music_mp4_end:\n"
         ".previous\n");
 
 // Page for phones / PCs on the LAN (upload, play, delete, on/off): bayosh_remote.html.
@@ -82,11 +95,54 @@ std::string json_str(const std::string& s) {
 	return out + "\"";
 }
 
+// v0.3: wallpaper sites the user adds (shared by the PS5 and every phone / PC): one URL per line.
+constexpr const char* kSitesFile = "/data/bayosh/sites.txt";
+std::vector<std::string> read_sites() {
+	std::vector<std::string> out;
+	FILE* f = fopen(kSitesFile, "r");
+	if (f == nullptr) {
+		return out;
+	}
+	char line[2100];
+	while (fgets(line, sizeof(line), f) != nullptr && out.size() < 30) {
+		std::string u(line);
+		while (!u.empty() && (u.back() == '\n' || u.back() == '\r' || u.back() == ' ')) {
+			u.pop_back();
+		}
+		if (u.rfind("http://", 0) == 0 || u.rfind("https://", 0) == 0) {
+			out.push_back(u);
+		}
+	}
+	fclose(f);
+	return out;
+}
+void write_sites(const std::vector<std::string>& sites) {
+	std::string text;
+	for (const std::string& u : sites) {
+		text += u + "\n";
+	}
+	const std::string tmp = std::string(kSitesFile) + ".tmp";
+	FILE* f = fopen(tmp.c_str(), "w");
+	if (f != nullptr) {
+		fwrite(text.data(), 1, text.size(), f);
+		fclose(f);
+		rename(tmp.c_str(), kSitesFile);
+	}
+}
+std::string sites_json() {
+	std::string j = "[";
+	const std::vector<std::string> s = read_sites();
+	for (size_t i = 0; i < s.size(); ++i) {
+		j += (i ? "," : "") + json_str(s[i]);
+	}
+	return j + "]";
+}
+
 std::string state_json() {
 	const State st = get_state();
 	std::string j  = std::string("{\"enabled\":") + (st.enabled ? "true" : "false") + ",\"dim\":" + std::to_string(st.dim) + ",\"volume\":" + std::to_string(st.volume) +
-	                ",\"blur\":" + std::to_string(st.blur) + ",\"looks\":[" + std::to_string(st.looks[0]) + "," + std::to_string(st.looks[1]) + "," + std::to_string(st.looks[2]) + "," + std::to_string(st.looks[3]) + "]" + ",\"shuffle\":" + (st.shuffle ? "true" : "false") + ",\"mainvideo\":" + (st.main_video ? "true" : "false") + ",\"gamevideos\":" + (st.game_videos ? "true" : "false") + ",\"gamepause\":" + (st.game_pause ? "true" : "false") + ",\"menuhide\":" + (st.menu_hide ? "true" : "false") + ",\"storeonly\":" + (st.store_only ? "true" : "false") + ",\"parallax\":" + (st.parallax ? "true" : "false") + ",\"light\":" + (st.light ? "true" : "false") + ",\"guided\":" + (st.guided ? "true" : "false") + ",\"lightnow\":" + json_str(st.light_now) +
-	                ",\"ip\":" + json_str(st.ip) + ",\"port\":" + std::to_string(kWebPort) + ",\"games\":" + json_str(games_text()) + ",\"game\":" + json_str(st.game) + ",\"status\":" + json_str(st.status) + ",\"current\":" + json_str(st.current) + ",\"videos\":[";
+	                ",\"blur\":" + std::to_string(st.blur) + ",\"looks\":[" + std::to_string(st.looks[0]) + "," + std::to_string(st.looks[1]) + "," + std::to_string(st.looks[2]) + "," + std::to_string(st.looks[3]) + "]" + ",\"shuffle\":" + (st.shuffle ? "true" : "false") + ",\"mainvideo\":" + (st.main_video ? "true" : "false") + ",\"gamevideos\":" + (st.game_videos ? "true" : "false") + ",\"gamepause\":" + (st.game_pause ? "true" : "false") + ",\"menuhide\":" + (st.menu_hide ? "true" : "false") + ",\"storeonly\":" + (st.store_only ? "true" : "false") + ",\"parallax\":" + (st.parallax ? "true" : "false") + ",\"light\":" + (st.light ? "true" : "false") + ",\"guided\":" + (st.guided ? "true" : "false") + ",\"lightnow\":" + json_str(st.light_now) + ",\"lightmode\":" + json_str(st.light_mode) + ",\"lightfix\":" + json_str(st.light_fix) + ",\"lightspeed\":" + std::to_string(st.light_speed) +
+	                ",\"mods\":" + (menu_mods_present() ? "true" : "false") + ",\"dl\":" + download_json() + ",\"sites\":" + sites_json() + ",\"ip\":" + json_str(st.ip) + ",\"port\":" + std::to_string(kWebPort) + ",\"games\":" + json_str(games_text()) + ",\"game\":" + json_str(st.game) + ",\"status\":" + json_str(st.status) + ",\"current\":" + json_str(st.current) + ",\"videos\":[";
 	for (size_t i = 0; i < st.videos.size(); ++i) {
 		const Video& v = st.videos[i];
 		j += (i ? ",{" : "{");
@@ -349,6 +405,38 @@ void save_upload(int fd, const std::string& query, const char* headers, const ch
 	reply_json(fd, result_json(true, ""));
 }
 
+// Embedded file with Range support (media elements ask for byte ranges).
+void serve_bytes(int fd, const char* type, const void* data, size_t size, const char* request) {
+	long long a = 0, b = static_cast<long long>(size) - 1;
+	bool      ranged = false;
+	if (const char* r = strcasestr(request, "\nRange: bytes=")) {
+		char* end = nullptr;
+		a = strtoll(r + 14, &end, 10);
+		if (end != nullptr && *end == '-') {
+			const long long e = strtoll(end + 1, nullptr, 10);
+			if (e > 0) {
+				b = std::min<long long>(e, static_cast<long long>(size) - 1);
+			}
+		}
+		ranged = true;
+		if (a < 0 || a > b) {
+			reply(fd, "416 Range Not Satisfiable", "text/plain", "", 0);
+			return;
+		}
+	}
+	char      head[320];
+	const int n = ranged ? snprintf(head, sizeof(head),
+	                                "HTTP/1.1 206 Partial Content\r\nContent-Type: %s\r\nAccept-Ranges: bytes\r\n"
+	                                "Content-Range: bytes %lld-%lld/%zu\r\nContent-Length: %lld\r\nConnection: close\r\n\r\n",
+	                                type, a, b, size, b - a + 1)
+	                     : snprintf(head, sizeof(head),
+	                                "HTTP/1.1 200 OK\r\nContent-Type: %s\r\nAccept-Ranges: bytes\r\nContent-Length: %zu\r\n"
+	                                "Cache-Control: max-age=86400\r\nConnection: close\r\n\r\n",
+	                                type, size);
+	send_all(fd, head, static_cast<size_t>(n));
+	send_all(fd, static_cast<const uint8_t*>(data) + a, static_cast<size_t>(b - a + 1));
+}
+
 bool from_lan(int fd) {
 	sockaddr_in peer {};
 	socklen_t   len = sizeof(peer);
@@ -417,6 +505,8 @@ void handle(int fd) {
 	} else if (path == "/" || path == "/index.html" || path == "/ps5") {
 		reply(fd, "200 OK", "text/html; charset=utf-8", bayosh_page_html,
 		      static_cast<size_t>(bayosh_page_html_end - bayosh_page_html));
+	} else if (path == "/music.mp4") {
+		serve_bytes(fd, "video/mp4", bayosh_music_mp4, static_cast<size_t>(bayosh_music_mp4_end - bayosh_music_mp4), headers);
 	} else if (path == "/icon.png") {
 		reply(fd, "200 OK", "image/png", bayosh_icon_png,
 		      static_cast<size_t>(bayosh_icon_png_end - bayosh_icon_png));
@@ -507,6 +597,13 @@ void handle(int fd) {
 		const std::string rgb = c == std::string::npos ? "" : query.substr(c + 2, 6);
 		const bool ok = video_at(index_arg(query), v) && set_clip_color(v.path, rgb);
 		reply_json(fd, result_json(ok, "bad colour"));
+	} else if (path == "/api/lightmode") {
+		// /api/lightmode?m=rainbow&c=RRGGBB&s=1
+		const size_t m = query.find("m="), c = query.find("c="), sp = query.find("s=");
+		const std::string mode = m == std::string::npos ? "" : query.substr(m + 2, query.find('&', m) - (m + 2));
+		const std::string rgb  = c == std::string::npos ? "" : query.substr(c + 2, 6);
+		const int         spd  = sp == std::string::npos ? 1 : atoi(query.c_str() + sp + 2);
+		reply_json(fd, result_json(set_light_mode(mode, rgb, spd), "Unknown light mode"));
 	} else if (path == "/api/guide") {
 		// /api/guide?done=1|0  first-run guide shown (stored once per console)
 		set_guide_done(query.find("done=0") == std::string::npos);
@@ -514,9 +611,49 @@ void handle(int fd) {
 	} else if (path == "/api/reset") {
 		const bool ok = reset_settings(error);
 		reply_json(fd, result_json(ok, error));
+	} else if (path == "/api/download") {
+		// v0.3: /api/download?url=<encoded https link to an .mp4>  |  ?cancel=1
+		if (query.find("cancel=1") != std::string::npos) {
+			cancel_download();
+			reply_json(fd, result_json(true, error));
+		} else {
+			const size_t      at  = query.find("url=");
+			const std::string url = at == std::string::npos ? "" : url_decode(query.substr(at + 4));
+			const bool        ok  = start_download(url, error);
+			reply_json(fd, result_json(ok, error));
+		}
+	} else if (path == "/api/sites") {
+		// /api/sites?add=<encoded url>  |  ?del=<index>
+		std::vector<std::string> sites = read_sites();
+		const size_t             a     = query.find("add=");
+		const size_t             d     = query.find("del=");
+		bool                     ok    = true;
+		if (a != std::string::npos) {
+			std::string u = url_decode(query.substr(a + 4));
+			ok = (u.rfind("http://", 0) == 0 || u.rfind("https://", 0) == 0) && u.size() < 2000 &&
+			     u.find_first_of(" \n\r\"<>") == std::string::npos && sites.size() < 30;
+			if (ok && std::find(sites.begin(), sites.end(), u) == sites.end()) {
+				sites.push_back(u);
+			}
+		} else if (d != std::string::npos) {
+			const size_t i = static_cast<size_t>(atoi(query.c_str() + d + 4));
+			ok = i < sites.size();
+			if (ok) {
+				sites.erase(sites.begin() + static_cast<long>(i));
+			}
+		}
+		if (ok) {
+			write_sites(sites);
+		}
+		reply_json(fd, result_json(ok, ok ? "" : "Dirección no válida"));
+	} else if (path == "/api/browser") {
+		const size_t      at  = query.find("url=");
+		const std::string url = at == std::string::npos ? "" : url_decode(query.substr(at + 4));
+		const bool        ok  = open_browser(url);
+		reply_json(fd, result_json(ok, ok ? "" : "No se pudo abrir el navegador"));
 	} else if (path == "/api/shutdown") {
 		reply_json(fd, result_json(true, error));
-		request_shutdown();
+		request_shutdown(query.find("full=1") != std::string::npos);
 	} else if (path == "/api/on" || path == "/api/off") {
 		const bool on = path == "/api/on";
 		const bool ok = set_enabled(on, error);
