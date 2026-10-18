@@ -1,0 +1,11 @@
+name: "💡 Sugerir una idea / Suggest an idea"
+description: "Algo que te gustaría ver en bayo.sh / Something you'd like in bayo.sh"
+labels: ["idea"]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: "Tu idea / Your idea"
+      description: "Qué te gustaría y para qué te serviría. / What you'd like and why."
+    validations:
+      required: true

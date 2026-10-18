@@ -1,0 +1,48 @@
+name: "🐞 Reportar un problema / Report a bug"
+description: "Algo no funciona en bayo.sh / Something doesn't work"
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ¡Gracias por reportar! Mientras más datos, más rápido se arregla.
+        Thanks for reporting! The more details, the faster it gets fixed.
+  - type: input
+    id: version
+    attributes:
+      label: "Versión de bayo.sh / bayo.sh version"
+      placeholder: "v0.3.1"
+    validations:
+      required: true
+  - type: input
+    id: firmware
+    attributes:
+      label: "Firmware del PS5 / PS5 firmware"
+      placeholder: "13.60"
+    validations:
+      required: true
+  - type: input
+    id: loader
+    attributes:
+      label: "Jailbreak y cargador / Jailbreak and payload loader"
+      placeholder: "etaHEN, OnionHEN…"
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: "¿Qué pasó? / What happened?"
+      description: "Qué hiciste, qué esperabas y qué pasó. / What you did, what you expected, what happened."
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: "Registros / Logs"
+      description: |
+        Adjunta `/data/bayosh/bayosh.log` y, si existe, `/data/bayosh/shellui.log` (arrástralos aquí).
+        Attach `/data/bayosh/bayosh.log` and, if present, `/data/bayosh/shellui.log` (drag them here).
+  - type: textarea
+    id: media
+    attributes:
+      label: "Foto o video (opcional) / Photo or video (optional)"
