@@ -88,6 +88,14 @@ El resultado queda en `dist/bayosh.elf`. El script aplica `patches/onionhen-deto
 
 `/api/state`, `/api/select?i=`, `/api/on`, `/api/off`, `/api/dim?v=`, `/api/volume?v=`, `/api/blur?v=`, `/api/look?k=&v=`, `/api/set?k=&v=`, `/api/games`, `/api/gamebg?tid=&i=`, `/api/delete?i=`, `POST /api/upload?name=`, `/api/reset`, `/api/shutdown`, `/video?i=`, `/thumb?i=`, `/gameicon?tid=`.
 
+## Apoya el proyecto ☕
+
+bayo.sh es gratis y siempre lo será. Si te gusta y quieres apoyar para que siga creciendo (más fondos, widgets, nuevas funciones), puedes invitarme un café:
+
+<p align="center"><a href="https://paypal.me/fungibayo"><img src="https://img.shields.io/badge/Apoya%20a%20bayo.sh-PayPal-22b8ff?style=for-the-badge&logo=paypal&logoColor=white" alt="Apoya a bayo.sh con PayPal"></a></p>
+
+Una ⭐ en el repo o compartirlo también ayuda muchísimo.
+
 ## Créditos
 
 Hecho por **Josué** · [BayoTech](#).

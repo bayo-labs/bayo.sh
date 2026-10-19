@@ -92,6 +92,14 @@ The result is `dist/bayosh.elf`. The script applies `patches/onionhen-detour.pat
 
 Open an [issue](https://github.com/bayo-labs/bayo.sh/issues) in English or Spanish, and attach `/data/bayosh/bayosh.log`.
 
+## Support the project ☕
+
+bayo.sh is free and always will be. If you enjoy it and want to help it grow (more wallpapers, widgets, new features), you can buy me a coffee:
+
+<p align="center"><a href="https://paypal.me/fungibayo"><img src="https://img.shields.io/badge/Support%20bayo.sh-PayPal-22b8ff?style=for-the-badge&logo=paypal&logoColor=white" alt="Support bayo.sh on PayPal"></a></p>
+
+A ⭐ on the repo or sharing it helps a lot too.
+
 ## Credits
 
 Made by **Josué** · BayoTech.
