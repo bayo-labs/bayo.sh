@@ -6,6 +6,8 @@
 
 <p align="center"><b>Fondos de pantalla animados en video para el inicio de tu PS5.</b></p>
 
+<p align="center"><b>🇲🇽 Español</b> · <a href="README.en.md">🇺🇸 English</a></p>
+
 <p align="center">
   <img src="https://img.shields.io/badge/versión-0.3.1-22b8ff?style=flat-square" alt="versión">
   <img src="https://img.shields.io/badge/plataforma-PS5-22b8ff?style=flat-square" alt="plataforma">
