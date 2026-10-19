@@ -209,6 +209,11 @@ int install_tile() {
 		}
 		g_inst_term();
 		log("tile: installed before this start: %s", first ? "no" : "yes");
+		// v0.3.2: already on the home screen with the same files: nothing to register (saves ~3 s).
+		if (!first && a == 0 && b == 0) {
+			log("tile: unchanged, already on the home screen");
+			return 0;
+		}
 	}
 
 	int rc = register_once();

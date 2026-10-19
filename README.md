@@ -9,7 +9,7 @@
 <p align="center"><b>🇲🇽 Español</b> · <a href="README.en.md">🇺🇸 English</a></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/versión-0.3.1-22b8ff?style=flat-square" alt="versión">
+  <img src="https://img.shields.io/badge/versión-0.4.0-22b8ff?style=flat-square" alt="versión">
   <img src="https://img.shields.io/badge/plataforma-PS5-22b8ff?style=flat-square" alt="plataforma">
   <img src="https://img.shields.io/badge/probado-13.60%20%2B%20etaHEN-22b8ff?style=flat-square" alt="probado">
   <img src="https://img.shields.io/badge/licencia-GPL--3.0-22b8ff?style=flat-square" alt="licencia">
@@ -32,6 +32,12 @@
 - **Luz del control**: el LED del DualSense sigue el color de tu fondo, o usa modos Fijo, Arcoíris, Respiración u Ola.
 - **Cualquier video**: si no es compatible (4K, HEVC, 60+ fps…), el botón **Convertir y aplicar** lo deja en 1080p desde el celular o la PC.
 - **Descargar desde un enlace**: pega el enlace de un .mp4 y el PS5 lo baja solo a tus fondos.
+- **Descubrir**: catálogo de fondos animados con buscador y categorías; **Descargar → Usar** sin salir de la app.
+- **WallpaperWaifu en Descubrir**: navega sus fondos (categorías, búsqueda, filtro 1080p) y dale a su botón verde de descarga; el PS5 lo guarda en tus fondos.
+- **Widgets en el inicio**: tarjeta de cristal con clima de tu ciudad (o detectado solo), temperatura del PS5, espacio libre y batería del control. Los datos se mueven y cambian de color, y el contorno brilla en modo Ola, Neón, Arcoíris, Sigue al fondo, Fijo o Respiración.
+- **QR para el celular**: escanéalo desde la guía o el inicio y se abre la app en tu teléfono.
+- **Catálogos propios**: publica un `.json` con tus fondos y cualquiera lo agrega con su enlace ([formato](catalog/README.md)).
+- **Rotación**: cambia de fondo cada 5, 15, 30 min o 1 h, aleatorio o en orden.
 - **Tus sitios de fondos**: agrega las páginas o repos que quieras; se guardan en el PS5.
 - **Música de fondo** en la página del celular/PC (fantasía oscura original, se apaga con un botón).
 - **Guía de primer uso** dentro de la app.
@@ -82,11 +88,13 @@ El resultado queda en `dist/bayosh.elf`. El script aplica `patches/onionhen-deto
 | `src/bayosh_shellui.cpp` | El módulo que corre dentro del menú del PS5 y pone el video de fondo |
 | `src/bayosh_web.cpp` | Servidor web en el puerto 9050 (la app y la página del celular) |
 | `src/bayosh_tile.cpp` | El ícono de la app en el inicio |
+| `src/bayosh_widgets.cpp` | Widgets del inicio (clima, temperatura, disco, batería) |
+| `src/bayosh_tls.cpp` | HTTPS propio con mbedTLS (catálogos, descargas, clima) |
 | `src/bayosh_page.html` | La interfaz (PS5, PC y celular) |
 
 ### API (puerto 9050)
 
-`/api/state`, `/api/select?i=`, `/api/on`, `/api/off`, `/api/dim?v=`, `/api/volume?v=`, `/api/blur?v=`, `/api/look?k=&v=`, `/api/set?k=&v=`, `/api/games`, `/api/gamebg?tid=&i=`, `/api/delete?i=`, `POST /api/upload?name=`, `/api/reset`, `/api/shutdown`, `/video?i=`, `/thumb?i=`, `/gameicon?tid=`.
+`/api/state`, `/api/select?i=`, `/api/on`, `/api/off`, `/api/dim?v=`, `/api/volume?v=`, `/api/blur?v=`, `/api/look?k=&v=`, `/api/set?k=&v=`, `/api/games`, `/api/gamebg?tid=&i=`, `/api/delete?i=`, `POST /api/upload?name=`, `/api/reset`, `/api/shutdown`, `/api/catalog?url=`, `/api/img?url=`, `/api/download?url=&name=`, `/api/widgets?k=&v=`, `/video?i=`, `/thumb?i=`, `/gameicon?tid=`.
 
 ## Apoya el proyecto ☕
 
@@ -101,6 +109,8 @@ Una ⭐ en el repo o compartirlo también ayuda muchísimo.
 Hecho por **Josué** · [BayoTech](#).
 
 bayo.sh es un proyecto derivado. El motor de video parte de **LiveShell** de ZiZc3 y usa el inyector, las librerías y el trabajo base de **[OnionHEN](https://github.com/aydencharles/onionHEN/)**. Los cambios de bayo.sh están en [CHANGELOG.md](CHANGELOG.md).
+
+También usa: [Mbed TLS](https://github.com/Mbed-TLS/mbedtls) (Apache-2.0), los certificados raíz de [certifi](https://github.com/certifi/python-certifi) (MPL-2.0), [qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator) de Kazuhiko Arase (MIT), el clima de [Open-Meteo](https://open-meteo.com/) (CC BY 4.0), la búsqueda de lugares de [OpenStreetMap / Nominatim](https://nominatim.openstreetmap.org/) (© colaboradores de OpenStreetMap, ODbL) y la ubicación aproximada de [GeoJS](https://www.geojs.io/). Los fondos de WallpaperWaifu son de sus autores y se descargan desde su página.
 
 ## Licencia
 

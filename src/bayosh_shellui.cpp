@@ -62,6 +62,14 @@ bool detour_exec_test = true;            // bayo.sh: detour runs a one-byte 'ret
 namespace {
 
 constexpr const char* kPathFile   = "/system_tmp/bayosh/video.txt";
+constexpr const char* kCmdFile    = "/system_tmp/bayosh/cmd.txt"; // v0.3.2: "exitapp <n>" from the payload
+std::atomic<bool>     g_exit_app_req {false};
+char                  g_light_udp[160] = {}; // v0.3.2: last "L ..." from the payload (UDP 9053)
+// v0.4 widgets: last "W ..." from the payload; read on the UI thread when the sequence moves.
+char                  g_wg_text[700] = {};
+std::atomic<int>      g_wg_seq {0};
+std::atomic<int>      g_light_udp_seq {0};
+
 constexpr const char* kLogFile    = "/system_tmp/bayosh/shellui.log";
 constexpr const char* kGuardFile  = "/system_tmp/bayosh/video_trying";
 constexpr const char* kStatusFile = "/system_tmp/bayosh/status.txt";
@@ -1831,6 +1839,530 @@ void build_look(Look look) {
 	wp_log("look %d: %d panels", static_cast<int>(look), g_look_count[look]);
 }
 
+// ---- v0.4 widgets: a "cristal neón" card on the home screen ------------------------------------
+// Built like the looks (UI3 Panels under the dim panel, so it stays above the video and leaves with
+// it) plus PUI Labels for the text. The payload sends "W <on>\t<title>\t<value>..." (UDP 9053).
+constexpr int kWgRows = 4;
+constexpr int kWgEdges = 8; // 4 sides x (glow, core)
+Obj   g_wg_label_class = nullptr;
+Obj   g_wg_card        = nullptr;
+Obj   g_wg_halo        = nullptr;          // soft rounded glow behind the card
+Obj   g_wg_edge[kWgEdges] = {};            // neon outline (glow + core line per side)
+float g_wg_row_col[kWgRows][3] = {};
+Obj   g_wg_title[kWgRows] = {};
+Obj   g_wg_value[kWgRows] = {};
+Obj   g_wg_dot[kWgRows]   = {};
+bool  g_wg_failed      = false;
+int   g_wg_shown_seq   = -1;
+int   g_wg_rows_built  = 0;
+const float kWgW = 520.0f, kWgX = 1920.0f - 64.0f - 520.0f, kWgRowH = 50.0f, kWgPad = 22.0f;
+const float kWgAccent[kWgRows][3] = {{0.13f, 0.72f, 1.0f}, {1.0f, 0.42f, 0.30f}, {0.66f, 0.33f, 0.97f}, {0.20f, 0.95f, 0.55f}};
+
+Obj wg_panel(Obj parent, float x, float y, float w, float h, void* color, const char* what) {
+	Obj ctor  = mono_class_get_method_from_name(g_dim_class, ".ctor", 0);
+	Obj panel = ctor != nullptr ? construct_pinned(g_dim_class, ctor, nullptr, what) : nullptr;
+	if (panel == nullptr) {
+		return nullptr;
+	}
+	property_set(g_ui3_widget, panel, "X", &x);
+	property_set(g_ui3_widget, panel, "Y", &y);
+	property_set(g_ui3_widget, panel, "Width", &w);
+	property_set(g_ui3_widget, panel, "Height", &h);
+	if (has_setter(g_dim_class, "BackgroundVisibility")) {
+		bool on = true;
+		property_set(g_dim_class, panel, "BackgroundVisibility", &on);
+	}
+	if (color != nullptr) {
+		property_set(g_dim_class, panel, g_dim_prop, color);
+	}
+	void* child[1] = {panel};
+	invoke(find_method_up(g_ui3_widget, "AppendChild", 1), parent, child, "AppendChild(widget)");
+	return panel;
+}
+
+void wg_round(Obj w, float radius) {
+	if (has_setter(g_ui3_widget, "BorderRadius")) {
+		property_set(g_ui3_widget, w, "BorderRadius", &radius);
+	}
+}
+
+Obj wg_label(Obj parent, float x, float y, float w, float h, float r, float g, float b) {
+	Obj ctor  = mono_class_get_method_from_name(g_wg_label_class, ".ctor", 0);
+	Obj label = ctor != nullptr ? construct_pinned(g_wg_label_class, ctor, nullptr, "widget label") : nullptr;
+	if (label == nullptr) {
+		return nullptr;
+	}
+	property_set(g_ui3_widget, label, "X", &x);
+	property_set(g_ui3_widget, label, "Y", &y);
+	property_set(g_ui3_widget, label, "Width", &w);
+	property_set(g_ui3_widget, label, "Height", &h);
+	void* col = tint(r, g, b, 1.0f);
+	if (col != nullptr) {
+		property_set(g_wg_label_class, label, "TextColor", col);
+	}
+	void* child[1] = {label};
+	invoke(find_method_up(g_ui3_widget, "AppendChild", 1), parent, child, "AppendChild(label)");
+	return label;
+}
+
+bool wg_build() {
+	if (g_dim_panel == nullptr && !g_dim_tried) {
+		create_dim_panel();
+	}
+	if (g_dim_panel == nullptr) {
+		return false;
+	}
+	Obj pui = open_image("/system_ex/common_ex/lib/Sce.PlayStation.PUI.dll");
+	for (const char* ns : {"Sce.PlayStation.PUI.UI3", "Sce.PlayStation.PUI"}) {
+		Obj k = pui != nullptr ? mono_class_from_name(pui, ns, "Label") : nullptr;
+		bool widget = false;
+		for (Obj c = k; c != nullptr && !widget; c = mono_class_get_parent(c)) {
+			widget = c == g_ui3_widget;
+		}
+		wp_log("widgets: %s.Label %p%s", ns, k, widget ? " (UI3 widget)" : "");
+		if (widget) {
+			g_wg_label_class = k;
+			break;
+		}
+	}
+	if (g_wg_label_class == nullptr) {
+		return false;
+	}
+	log_properties(g_wg_label_class, "widgets Label");
+	g_wg_halo = wg_panel(g_dim_panel, kWgX - 6.0f, 794.0f, kWgW + 12.0f, 212.0f, tint(0.13f, 0.72f, 1.0f, 0.16f), "widget halo");
+	if (g_wg_halo != nullptr) wg_round(g_wg_halo, 32.0f);
+	g_wg_card = wg_panel(g_dim_panel, kWgX, 800.0f, kWgW, 200.0f, tint(0.03f, 0.04f, 0.09f, 0.66f), "widget card");
+	if (g_wg_card == nullptr) {
+		return false;
+	}
+	wg_round(g_wg_card, 26.0f);
+	// Neon outline: one glow strip + one core line per side, inset past the rounded corners.
+	// Sizes are set in wg_layout(); colors animate in wg_neon().
+	for (int i = 0; i < kWgEdges; ++i) {
+		g_wg_edge[i] = wg_panel(g_wg_card, 0.0f, 0.0f, 1.0f, 1.0f, nullptr, "widget edge");
+		if (g_wg_edge[i] != nullptr) wg_round(g_wg_edge[i], (i & 1) ? 1.0f : 4.0f);
+	}
+	for (int i = 0; i < kWgRows; ++i) {
+		const float y = kWgPad + i * kWgRowH;
+		g_wg_dot[i]   = wg_panel(g_wg_card, 24.0f, y + 17.0f, 10.0f, 10.0f,
+		                         tint(kWgAccent[i][0], kWgAccent[i][1], kWgAccent[i][2], 1.0f), "widget dot");
+		if (g_wg_dot[i] != nullptr) wg_round(g_wg_dot[i], 5.0f);
+		g_wg_title[i] = wg_label(g_wg_card, 46.0f, y, 170.0f, 44.0f, kWgAccent[i][0], kWgAccent[i][1], kWgAccent[i][2]);
+		g_wg_value[i] = wg_label(g_wg_card, 220.0f, y, kWgW - 240.0f, 44.0f, 0.95f, 0.96f, 1.0f);
+	}
+	Obj font = g_wg_value[0] != nullptr ? property_get(g_wg_label_class, g_wg_value[0], "Font") : nullptr;
+	if (font != nullptr && mono_object_get_class != nullptr) {
+		log_properties(mono_object_get_class(font), "widgets Font");
+	}
+	wp_log("widgets: card built");
+	return true;
+}
+
+void wg_text(Obj label, const char* text) {
+	if (label == nullptr) return;
+	Obj str = mono_string_new(g_domain, text);
+	property_set(g_wg_label_class, label, "Text", str);
+}
+
+void wg_visible(Obj w, bool on) {
+	if (w != nullptr) property_set(g_ui3_widget, w, "Visible", &on);
+}
+
+void wg_rect(Obj w, float x, float y, float ww, float hh) {
+	if (w == nullptr) return;
+	property_set(g_ui3_widget, w, "X", &x);
+	property_set(g_ui3_widget, w, "Y", &y);
+	property_set(g_ui3_widget, w, "Width", &ww);
+	property_set(g_ui3_widget, w, "Height", &hh);
+}
+
+// Outline geometry for a card of height h (edges are children of the card).
+void wg_layout(float h) {
+	const float r = 22.0f; // keep clear of the rounded corners
+	// top, bottom, left, right; even index = glow (6 px), odd = core (2 px)
+	wg_rect(g_wg_edge[0], r, -2.0f, kWgW - 2 * r, 6.0f);
+	wg_rect(g_wg_edge[1], r, 0.0f, kWgW - 2 * r, 2.0f);
+	wg_rect(g_wg_edge[2], r, h - 4.0f, kWgW - 2 * r, 6.0f);
+	wg_rect(g_wg_edge[3], r, h - 2.0f, kWgW - 2 * r, 2.0f);
+	wg_rect(g_wg_edge[4], -2.0f, r, 6.0f, h - 2 * r);
+	wg_rect(g_wg_edge[5], 0.0f, r, 2.0f, h - 2 * r);
+	wg_rect(g_wg_edge[6], kWgW - 4.0f, r, 6.0f, h - 2 * r);
+	wg_rect(g_wg_edge[7], kWgW - 2.0f, r, 2.0f, h - 2 * r);
+}
+
+// Outline styles (from the payload): wave | neon | rainbow | follow | fixed | breathe | off.
+enum WgStyle { kWgWave, kWgNeonS, kWgRainbow, kWgFollow, kWgFixed, kWgBreathe, kWgOff };
+int   g_wg_style = kWgWave;
+float g_wg_cols[8][3] = {};
+int   g_wg_ncols = 0;
+int   g_wg_static_done = 0; // static styles: colours already set
+long  g_wg_t0 = 0;
+
+void wg_hex(const char* h, float* c) {
+	const unsigned v = static_cast<unsigned>(strtoul(h, nullptr, 16));
+	c[0] = ((v >> 16) & 255) / 255.0f;
+	c[1] = ((v >> 8) & 255) / 255.0f;
+	c[2] = (v & 255) / 255.0f;
+}
+
+// "1 wave c1 c2 ..." (the part before the first tab)
+void wg_parse_style(const char* head) {
+	char buf[200];
+	snprintf(buf, sizeof(buf), "%s", head);
+	char* save = nullptr;
+	char* tok  = strtok_r(buf, " ", &save); // on flag
+	tok        = tok != nullptr ? strtok_r(nullptr, " ", &save) : nullptr;
+	static const char* const kNames[] = {"wave", "neon", "rainbow", "follow", "fixed", "breathe", "off"};
+	int style = kWgWave;
+	for (int i = 0; tok != nullptr && i < 7; ++i) {
+		if (strcmp(tok, kNames[i]) == 0) style = i;
+	}
+	float cols[8][3];
+	int   n = 0;
+	while (tok != nullptr && (tok = strtok_r(nullptr, " ", &save)) != nullptr && n < 8) {
+		if (strlen(tok) == 6) wg_hex(tok, cols[n++]);
+	}
+	if (style == kWgNeonS || n == 0) {
+		static const char* const kNeonHex[] = {"22b8ff", "a855f7", "ff3d9a"};
+		n = 3;
+		for (int i = 0; i < 3; ++i) wg_hex(kNeonHex[i], cols[i]);
+	}
+	const bool changed = style != g_wg_style || n != g_wg_ncols || memcmp(cols, g_wg_cols, sizeof(float) * 3 * n) != 0;
+	if (changed) {
+		g_wg_style = style;
+		g_wg_ncols = n;
+		memcpy(g_wg_cols, cols, sizeof(float) * 3 * n);
+		g_wg_static_done = 0;
+		wp_log("widgets: outline %s, %d colour(s)", kNames[style], n);
+	}
+}
+
+void wg_hsv(float h, float* c) {
+	h = (h - floorf(h)) * 6.0f;
+	const int   i = static_cast<int>(h);
+	const float f = h - i, q = 1.0f - f;
+	const float t[6][3] = {{1, f, 0}, {q, 1, 0}, {0, 1, f}, {0, q, 1}, {f, 0, 1}, {1, 0, q}};
+	for (int k = 0; k < 3; ++k) c[k] = 0.15f + 0.85f * t[i % 6][k];
+}
+
+// Colour along the palette at phase p (0..1), smooth blend between neighbours.
+void wg_along(float p, float* c) {
+	const int n = g_wg_ncols > 0 ? g_wg_ncols : 1;
+	p           = (p - floorf(p)) * n;
+	const int i = static_cast<int>(p) % n, j = (i + 1) % n;
+	float     f = p - floorf(p);
+	f           = f < 0.55f ? 0.0f : (f - 0.55f) / 0.45f; // hold, then slide
+	f           = f * f * (3 - 2 * f);
+	for (int k = 0; k < 3; ++k) c[k] = g_wg_cols[i][k] + (g_wg_cols[j][k] - g_wg_cols[i][k]) * f;
+}
+
+// Animate the outline (called every few frames while the card is on).
+void wg_neon() {
+	if (g_wg_card == nullptr) return;
+	const bool still = g_wg_style == kWgFixed || g_wg_style == kWgOff;
+	if (still && g_wg_static_done) return;
+	if (g_wg_t0 == 0) g_wg_t0 = now_ms();
+	const float t = (now_ms() - g_wg_t0) / 1000.0f;
+	// clockwise: top, right, bottom, left -> edge pairs 0/1, 6/7, 2/3, 4/5
+	static const float kPhase[kWgEdges] = {0.0f, 0.0f, 0.5f, 0.5f, 0.75f, 0.75f, 0.25f, 0.25f};
+	float pulse = 1.0f;
+	if (g_wg_style == kWgNeonS || g_wg_style == kWgFollow) pulse = 0.55f + 0.45f * (0.5f + 0.5f * sinf(t * 1.05f));
+	if (g_wg_style == kWgBreathe) pulse = 0.15f + 0.85f * (0.5f - 0.5f * cosf(t * 1.9f));
+	float halo[3] = {0, 0, 0};
+	for (int i = 0; i < kWgEdges; ++i) {
+		if (g_wg_edge[i] == nullptr) continue;
+		float c[3];
+		switch (g_wg_style) {
+		case kWgWave: wg_along(t / (2.6f * (g_wg_ncols > 0 ? g_wg_ncols : 1)) + kPhase[i], c); break;
+		case kWgRainbow: wg_hsv(t / 8.0f + kPhase[i], c); break;
+		case kWgNeonS: wg_along(t / 18.0f, c); break;
+		default: memcpy(c, g_wg_cols[0], sizeof(c)); break;
+		}
+		if (i == 0) memcpy(halo, c, sizeof(halo));
+		const bool  core  = (i & 1) != 0;
+		const float alpha = g_wg_style == kWgOff ? 0.0f : core ? 0.35f + 0.65f * pulse : 0.10f + 0.30f * pulse;
+		void*       col   = tint(c[0], c[1], c[2], alpha);
+		if (col != nullptr) property_set(g_dim_class, g_wg_edge[i], g_dim_prop, col);
+	}
+	if (g_wg_halo != nullptr) {
+		void* col = tint(halo[0], halo[1], halo[2], g_wg_style == kWgOff ? 0.0f : 0.05f + 0.11f * pulse);
+		if (col != nullptr) property_set(g_dim_class, g_wg_halo, g_dim_prop, col);
+	}
+	g_wg_static_done = 1;
+}
+
+// ---- controller battery (LoginMgr Utility.GetDeviceInfoList) ----------------------------------
+int g_bat_tick = 0;
+bool g_bat_failed = false;
+char g_bat_last[32] = "";
+int static_enum(Obj klass, const char* name, int fallback) {
+	Obj f  = klass != nullptr ? mono_class_get_field_from_name(klass, name) : nullptr;
+	Obj vt = f != nullptr ? mono_class_vtable(g_domain, klass) : nullptr;
+	if (vt == nullptr) return fallback;
+	int64_t v = 0;
+	mono_field_static_get_value(vt, f, &v);
+	return static_cast<int>(static_cast<int32_t>(v));
+}
+void battery_poll() {
+	static Obj util = nullptr, getlist = nullptr, pclass = nullptr, fclass = nullptr, arr_class = nullptr, getvalue = nullptr;
+	static Obj f_level = nullptr, f_state = nullptr, f_type = nullptr;
+	static int list_all = 0, st_none = 0, st_charging = 2, st_charged = 3, logs = 0;
+	if (g_bat_failed) return;
+	if (getlist == nullptr) {
+		Obj lm  = open_image("/system_ex/common_ex/lib/Sce.Vsh.ShellUI.LoginMgr.dll");
+		Obj leg = open_image("/system_ex/common_ex/lib/Sce.Vsh.ShellUI.Legacy.dll");
+		util    = lm != nullptr ? mono_class_from_name(lm, "Sce.Vsh.ShellUI.LoginMgr", "Utility") : nullptr;
+		getlist = util != nullptr ? mono_class_get_method_from_name(util, "GetDeviceInfoList", 3) : nullptr;
+		pclass  = leg != nullptr ? mono_class_from_name(leg, "Sce.Vsh.ShellUI.LoginMgrProxy", "DeviceInfoFullParam") : nullptr;
+		fclass  = leg != nullptr ? mono_class_from_name(leg, "Sce.Vsh.ShellUI.LoginMgrProxy", "DeviceInfoFull") : nullptr;
+		Obj lt  = leg != nullptr ? mono_class_from_name(leg, "Sce.Vsh.ShellUI.LoginMgrProxy", "DeviceInfoListType") : nullptr;
+		Obj bs  = lm != nullptr ? mono_class_from_name(lm, "Sce.Vsh.ShellUI.LoginMgr", "BatteryState") : nullptr;
+		list_all    = static_enum(lt, "AllDevice", 0);
+		st_none     = static_enum(bs, "BatteryStateBatteryNone", 0);
+		st_charging = static_enum(bs, "BatteryStateCharging", 2);
+		st_charged  = static_enum(bs, "BatteryStateCharged", 3);
+		arr_class   = mono_get_corlib != nullptr ? mono_class_from_name(mono_get_corlib(), "System", "Array") : nullptr;
+		if (arr_class != nullptr) {
+			Obj d    = mono_method_desc_new("System.Array:GetValue(int)", 1);
+			getvalue = d != nullptr ? mono_method_desc_search_in_class(d, arr_class) : nullptr;
+			if (d != nullptr) mono_method_desc_free(d);
+		}
+		f_level = fclass != nullptr ? mono_class_get_field_from_name(fclass, "batteryLevel") : nullptr;
+		f_state = fclass != nullptr ? mono_class_get_field_from_name(fclass, "batteryState") : nullptr;
+		f_type  = fclass != nullptr ? mono_class_get_field_from_name(fclass, "nativeDeviceType2") : nullptr;
+		wp_log("battery: util %p list %p param %p full %p getvalue %p level %p state %p (all=%d none=%d chg=%d full=%d)", util,
+		       getlist, pclass, fclass, getvalue, f_level, f_state, list_all, st_none, st_charging, st_charged);
+		if (getlist == nullptr || pclass == nullptr || getvalue == nullptr || f_level == nullptr || f_state == nullptr) {
+			g_bat_failed = true;
+			return;
+		}
+	}
+	Obj   pobj  = mono_object_new(g_domain, pclass);
+	void* parg  = pobj != nullptr && mono_class_is_valuetype(pclass) ? mono_object_unbox(pobj) : pobj;
+	int32_t type = list_all;
+	Obj   arr   = nullptr;
+	void* args[3] = {&type, parg, &arr};
+	Obj   ret   = nullptr;
+	if (pobj == nullptr || !invoke(getlist, nullptr, args, "GetDeviceInfoList", &ret)) {
+		if (++logs > 3) g_bat_failed = true;
+		return;
+	}
+	const int rc = ret != nullptr ? *static_cast<int32_t*>(mono_object_unbox(ret)) : -1;
+	Obj  lenb = arr != nullptr ? property_get(arr_class, arr, "Length") : nullptr;
+	const int n = lenb != nullptr ? *static_cast<int32_t*>(mono_object_unbox(lenb)) : 0;
+	int best = -1, best_state = 0;
+	char raw[200];
+	size_t rn = static_cast<size_t>(snprintf(raw, sizeof(raw), "rc %#x n %d:", rc, n));
+	for (int i = 0; i < n && i < 8; ++i) {
+		int32_t idx = i;
+		void*   ga[1] = {&idx};
+		Obj     e = nullptr;
+		if (!invoke(getvalue, arr, ga, "Array.GetValue", &e) || e == nullptr) continue;
+		int64_t lv = 0, st = 0, ty = 0;
+		mono_field_get_value(e, f_level, &lv);
+		mono_field_get_value(e, f_state, &st);
+		if (f_type != nullptr) mono_field_get_value(e, f_type, &ty);
+		const int level = static_cast<int>(static_cast<uint8_t>(lv)), state = static_cast<int>(static_cast<int32_t>(st));
+		if (rn < sizeof(raw)) {
+			rn += static_cast<size_t>(snprintf(raw + rn, sizeof(raw) - rn, " [t%lld s%d l%d]", static_cast<long long>(static_cast<int32_t>(ty)), state, level));
+		}
+		// real devices report 0..100 and a state >= 0; the others say -1 / 255
+		if (state >= 0 && level <= 100 && best < 0) {
+			best       = level;
+			best_state = state;
+		}
+	}
+	char msg[32];
+	if (best < 0) {
+		snprintf(msg, sizeof(msg), "-");
+	} else {
+		const int pct = best; // DualSense: 0..100 (test: 75)
+		const bool charging = best_state == st_charging;
+		snprintf(msg, sizeof(msg), "%s%d", charging ? "c" : "", best_state == st_charged ? 100 : pct);
+	}
+	if (strcmp(msg, g_bat_last) != 0 || logs < 2) {
+		wp_log("battery: %s -> %s", raw, msg);
+		++logs;
+	}
+	snprintf(g_bat_last, sizeof(g_bat_last), "%s", msg);
+	to_payload('B', msg, strlen(msg));
+}
+
+// ---- widget motion: values slide in, rows alternate (temp/sky <-> place...), dots pulse, card rises
+struct WgRowAnim {
+	char alt[3][100];
+	int  nalt   = 0;
+	int  cur    = 0;
+	long t_start = 0;
+	long t_next  = 0;
+	bool active  = false;
+};
+WgRowAnim g_wg_ra[kWgRows];
+long      g_wg_card_t  = 0;
+float     g_wg_card_y  = 0;
+bool      g_wg_card_on = false;
+const float kWgValueX  = 220.0f;
+
+void wg_opacity(Obj w, float o) {
+	if (w != nullptr) property_set(g_ui3_widget, w, "Opacity", &o);
+}
+
+void wg_row_value(int i, const char* value) {
+	WgRowAnim& r = g_wg_ra[i];
+	char       a[3][100] = {};
+	int        n = 0;
+	const char* p = value;
+	while (n < 3) {
+		const char* sep = strchr(p, '\x1f');
+		const size_t len = sep != nullptr ? static_cast<size_t>(sep - p) : strlen(p);
+		snprintf(a[n++], sizeof(a[0]), "%.*s", static_cast<int>(len < 99 ? len : 99), p);
+		if (sep == nullptr) break;
+		p = sep + 1;
+	}
+	if (n == r.nalt && memcmp(a, r.alt, sizeof(a)) == 0) return; // same data: keep the rhythm
+	const bool first_text_same = r.nalt > 0 && strcmp(a[0], r.alt[r.cur]) == 0;
+	memcpy(r.alt, a, sizeof(a));
+	r.nalt = n;
+	r.cur  = 0;
+	const long now = now_ms();
+	r.t_next = now + 7000 + i * 900; // stagger the rows
+	if (first_text_same) return;
+	wg_text(g_wg_value[i], r.alt[0]);
+	r.t_start = now;
+	r.active  = true;
+}
+
+void wg_anim() {
+	if (g_wg_card == nullptr || !g_wg_card_on) return;
+	const long now = now_ms();
+	auto ease = [](float p) { p = p < 0 ? 0 : p > 1 ? 1 : p; return 1.0f - (1.0f - p) * (1.0f - p) * (1.0f - p); };
+	if (g_wg_card_t != 0) { // the card rises into place
+		const float e = ease((now - g_wg_card_t) / 650.0f);
+		const float y = g_wg_card_y + 46.0f * (1.0f - e);
+		property_set(g_ui3_widget, g_wg_card, "Y", const_cast<float*>(&y));
+		const float hy = y - 6.0f;
+		if (g_wg_halo != nullptr) property_set(g_ui3_widget, g_wg_halo, "Y", const_cast<float*>(&hy));
+		wg_opacity(g_wg_card, e);
+		wg_opacity(g_wg_halo, e);
+		if (e >= 1.0f) g_wg_card_t = 0;
+	}
+	for (int i = 0; i < kWgRows; ++i) {
+		WgRowAnim& r = g_wg_ra[i];
+		if (r.nalt == 0) continue;
+		if (r.nalt > 1 && now >= r.t_next) {
+			r.cur     = (r.cur + 1) % r.nalt;
+			r.t_next  = now + (r.cur == 0 ? 7000 : 4000);
+			r.t_start = now;
+			r.active  = true;
+			wg_text(g_wg_value[i], r.alt[r.cur]);
+		}
+		if (r.active) {
+			const float e = ease((now - r.t_start) / 480.0f);
+			const float x = kWgValueX + 28.0f * (1.0f - e);
+			property_set(g_ui3_widget, g_wg_value[i], "X", const_cast<float*>(&x));
+			wg_opacity(g_wg_value[i], e);
+			if (e >= 1.0f) r.active = false;
+		}
+		// dots breathe one after another, like a slow wave down the card
+		wg_opacity(g_wg_dot[i], 0.45f + 0.55f * (0.5f + 0.5f * sinf(now / 520.0f - i * 0.9f)));
+	}
+}
+
+void widgets_tick() {
+	if (g_wg_text[0] == '1') {
+		// first read ~8 s after the card is on, then every ~30 s (tick = 15 frames)
+		if (g_bat_tick++ % 120 == 32) battery_poll();
+	}
+	const int seq = g_wg_seq.load();
+	if (seq == g_wg_shown_seq || g_wg_failed || seq == 0) {
+		return;
+	}
+	char text[sizeof(g_wg_text)];
+	snprintf(text, sizeof(text), "%s", g_wg_text);
+	const bool on = text[0] == '1';
+	if (g_wg_card == nullptr) {
+		if (!on) {
+			g_wg_shown_seq = seq;
+			return;
+		}
+		if (!wg_build()) {
+			g_wg_failed = true;
+			wp_log("widgets: unavailable");
+			return;
+		}
+	}
+	g_wg_shown_seq = seq;
+	{
+		char head[200];
+		const char* tab = strchr(text, '\t');
+		const size_t hl = tab != nullptr ? static_cast<size_t>(tab - text) : strlen(text);
+		snprintf(head, sizeof(head), "%.*s", static_cast<int>(hl < sizeof(head) ? hl : sizeof(head) - 1), text);
+		wg_parse_style(head);
+	}
+	// Fields after the head: "RRGGBB|title", value, ...
+	const char* f[kWgRows * 2] = {};
+	int         nf = 0;
+	char*       p  = strchr(text, '\t');
+	while (p != nullptr && nf < kWgRows * 2) {
+		*p      = 0;
+		f[nf++] = p + 1;
+		p       = strchr(p + 1, '\t');
+	}
+	const int rows = nf / 2;
+	for (int i = 0; i < kWgRows; ++i) {
+		const bool show = on && i < rows;
+		wg_visible(g_wg_dot[i], show);
+		wg_visible(g_wg_title[i], show);
+		wg_visible(g_wg_value[i], show);
+		if (!show) g_wg_ra[i].nalt = 0; // animate again when it comes back
+		if (show) {
+			const char* title = f[i * 2];
+			float       c[3]  = {kWgAccent[i][0], kWgAccent[i][1], kWgAccent[i][2]};
+			if (strlen(title) > 7 && title[6] == '|') {
+				wg_hex(title, c);
+				title += 7;
+			}
+			if (memcmp(c, g_wg_row_col[i], sizeof(c)) != 0) { // dynamic row colour (weather, heat, battery)
+				memcpy(g_wg_row_col[i], c, sizeof(c));
+				void* dc = tint(c[0], c[1], c[2], 1.0f);
+				if (dc != nullptr && g_wg_dot[i] != nullptr) property_set(g_dim_class, g_wg_dot[i], g_dim_prop, dc);
+				void* tc = tint(c[0], c[1], c[2], 1.0f);
+				if (tc != nullptr && g_wg_title[i] != nullptr) property_set(g_wg_label_class, g_wg_title[i], "TextColor", tc);
+			}
+			wg_text(g_wg_title[i], title);
+			wg_row_value(i, f[i * 2 + 1]);
+		}
+	}
+	const float h = rows > 0 ? kWgPad * 2 + rows * kWgRowH - 6.0f : 0.0f;
+	const float y = 1080.0f - 70.0f - h;
+	property_set(g_ui3_widget, g_wg_card, "Height", const_cast<float*>(&h));
+	g_wg_card_y = y;
+	const bool visible = on && rows > 0;
+	if (visible && !g_wg_card_on) {
+		g_wg_card_t = now_ms(); // entrance
+		const float y0 = y + 46.0f;
+		property_set(g_ui3_widget, g_wg_card, "Y", const_cast<float*>(&y0));
+		wg_opacity(g_wg_card, 0.0f);
+		wg_opacity(g_wg_halo, 0.0f);
+	} else if (g_wg_card_t == 0) {
+		property_set(g_ui3_widget, g_wg_card, "Y", const_cast<float*>(&y));
+	}
+	g_wg_card_on = visible;
+	wg_layout(h);
+	if (g_wg_card_t == 0) wg_rect(g_wg_halo, kWgX - 6.0f, y - 6.0f, kWgW + 12.0f, h + 12.0f);
+	else {
+		const float hw = kWgW + 12.0f, hh = h + 12.0f;
+		property_set(g_ui3_widget, g_wg_halo, "Width", const_cast<float*>(&hw));
+		property_set(g_ui3_widget, g_wg_halo, "Height", const_cast<float*>(&hh));
+	}
+	wg_visible(g_wg_halo, on && rows > 0);
+	wg_visible(g_wg_card, on && rows > 0);
+	if (rows != g_wg_rows_built) {
+		g_wg_rows_built = rows;
+		wp_log("widgets: %d row(s), %s", rows, on ? "on" : "off");
+	}
+}
+
 void refresh_looks() {
 	if (g_dim_panel == nullptr) {
 		if (g_dim_tried || !video_active()) {
@@ -2414,7 +2946,61 @@ void xfade_tick() {
 	}
 }
 
+// v0.3.2: "Cerrar" closes the bayo.sh window for real: ShellAppManager.GetLastShellApp() is the app
+// that was just in front (ours, since the user pressed Cerrar in it); ExitApp() only if its TitleId
+// is BYSH00001, so another app is never touched.
+void exit_our_app() {
+	Obj mgr = find_class("Sce.Vsh.ShellUI.AppSystem", "ShellAppManager");
+	Obj get = mgr != nullptr ? mono_class_get_method_from_name(mgr, "GetLastShellApp", 0) : nullptr;
+	if (get == nullptr) {
+		wp_log("exitapp: ShellAppManager.GetLastShellApp not found");
+		return;
+	}
+	Obj exc = nullptr;
+	Obj app = mono_runtime_invoke(get, nullptr, nullptr, &exc);
+	if (exc != nullptr || app == nullptr) {
+		wp_log("exitapp: no last app (exception %p)", exc);
+		return;
+	}
+	Obj klass = mono_object_get_class(app);
+	Obj tid_m = find_method_up(klass, "get_TitleId", 0);
+	Obj name_m = find_method_up(klass, "get_Name", 0);
+	char tid[64] = "?", name[96] = "?";
+	if (tid_m != nullptr) {
+		exc = nullptr;
+		Obj s = mono_runtime_invoke(tid_m, app, nullptr, &exc);
+		if (s != nullptr && exc == nullptr) {
+			char* u = mono_string_to_utf8(s);
+			snprintf(tid, sizeof(tid), "%s", u ? u : "");
+		}
+	}
+	if (name_m != nullptr) {
+		exc = nullptr;
+		Obj s = mono_runtime_invoke(name_m, app, nullptr, &exc);
+		if (s != nullptr && exc == nullptr) {
+			char* u = mono_string_to_utf8(s);
+			snprintf(name, sizeof(name), "%s", u ? u : "");
+		}
+	}
+	wp_log("exitapp: last app %s '%s' (%s)", tid, name, klass ? mono_class_get_name(klass) : "?");
+	if (strcmp(tid, "BYSH00001") != 0) {
+		wp_log("exitapp: not our window, left alone");
+		return;
+	}
+	Obj ex_m = find_method_up(klass, "ExitApp", 0);
+	if (ex_m == nullptr) {
+		wp_log("exitapp: ExitApp() not found");
+		return;
+	}
+	exc = nullptr;
+	mono_runtime_invoke(ex_m, app, nullptr, &exc);
+	wp_log("exitapp: ExitApp() %s", exc == nullptr ? "done" : "threw");
+}
+
 void focus_tick() {
+	if (g_exit_app_req.exchange(false)) {
+		exit_our_app();
+	}
 	if (!g_focus_ready) {
 		setup_focus();
 	}
@@ -3216,6 +3802,15 @@ void Update_Hook(Obj self) {
 		refresh_dim();
 		refresh_blur();
 		refresh_looks();
+		if (g_tick % 4 == 0 && g_wg_card != nullptr && g_wg_text[0] == '1') {
+			wg_neon(); // ~15 updates/s for the moving styles; static ones paint once
+		}
+		if (g_tick % 2 == 1) {
+			wg_anim(); // ~30 updates/s, only property sets (no allocations)
+		}
+		if (g_tick % 15 == 0) {
+			widgets_tick();
+		}
 		if (true) { // every frame: the menu fade needs it (just a static field read)
 			focus_tick();
 			parallax_tick();
@@ -3397,6 +3992,46 @@ uint32_t light_hue(float h) { // h in [0,1): full saturation and brightness
 	}
 }
 
+void* cmd_udp_thread(void*) {
+	const int s = socket(AF_INET, SOCK_DGRAM, 0);
+	sockaddr_in a {};
+	a.sin_family      = AF_INET;
+	a.sin_port        = htons(9053);
+	a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	if (s < 0 || bind(s, reinterpret_cast<sockaddr*>(&a), sizeof(a)) != 0) {
+		wp_log("commands: cannot listen on 9053 (errno %d)", errno);
+		return nullptr;
+	}
+	wp_log("commands: listening on 9053");
+	char buf[720];
+	char last_x[64] = {};
+	for (;;) {
+		const ssize_t n = recv(s, buf, sizeof(buf) - 1, 0);
+		if (n <= 2) {
+			continue;
+		}
+		buf[n] = 0;
+		if (buf[0] == 'W' && buf[1] == ' ') {
+			if (strcmp(buf + 2, g_wg_text) != 0) {
+				snprintf(g_wg_text, sizeof(g_wg_text), "%s", buf + 2);
+				++g_wg_seq;
+			}
+		} else if (buf[0] == 'L' && buf[1] == ' ') {
+			if (strcmp(buf + 2, g_light_udp) != 0) {
+				snprintf(g_light_udp, sizeof(g_light_udp), "%s", buf + 2);
+				++g_light_udp_seq;
+			}
+		} else if (buf[0] == 'X' && buf[1] == ' ' && strcmp(buf + 2, last_x) != 0) {
+			snprintf(last_x, sizeof(last_x), "%s", buf + 2);
+			wp_log("command: %s", buf + 2);
+			if (strncmp(buf + 2, "exitapp", 7) == 0) {
+				g_exit_app_req = true;
+			}
+		}
+	}
+	return nullptr;
+}
+
 void* light_thread(void*) {
 	LightReq req;
 	char     seen[160] = {};
@@ -3409,11 +4044,20 @@ void* light_thread(void*) {
 		usleep(50 * 1000);
 		if (tick++ % 8 == 0) {
 			char line[160] = {};
-			if (FILE* f = fopen(kLightFile, "r")) {
+			static int udp_seen = 0;
+			if (g_light_udp_seq.load() != 0) {
+				// v0.3.2: the payload sends it over UDP; the file is only read when nothing came that way
+				udp_seen = g_light_udp_seq.load();
+				snprintf(line, sizeof(line), "%s", g_light_udp);
+			} else if (FILE* f = fopen(kLightFile, "r")) {
 				if (fgets(line, sizeof(line), f) != nullptr) {
 					line[strcspn(line, "\r\n")] = 0;
 				}
 				fclose(f);
+			}
+			(void)udp_seen;
+			for (int i = static_cast<int>(strlen(line)) - 1; i >= 0 && line[i] == ' '; --i) {
+				line[i] = 0;
 			}
 			if (line[0] != 0 && strcmp(line, seen) != 0) {
 				snprintf(seen, sizeof(seen), "%s", line);
@@ -3551,7 +4195,7 @@ void* close_probe_thread(void*) {
 }
 
 void* wallpaper_thread(void*) {
-	sleep(3); // was 5: a quicker first picture
+	usleep(1500 * 1000); // v0.3.2: was 3 s (and 5 before): a quicker first picture
 	char seen[512];
 	read_request_line(seen, sizeof(seen));
 	if (guard_exists()) {
@@ -3580,10 +4224,10 @@ void* wallpaper_thread(void*) {
 			}
 			fclose(f);
 		}
-		// Repeat the status every ~2 s: a payload started while we already play learns it at once
-		// (it waited 40 s for a change before, test v11-24).
+		// Repeat the status every ~1 s (v0.3.2, was ~2 s): a payload started while we already play
+		// learns it at once, and a new start can tell quickly that a module is already inside.
 		static int status_beat = 0;
-		if (++status_beat >= 7 && g_last_status[0] != 0) {
+		if (++status_beat >= 3 && g_last_status[0] != 0) {
 			status_beat = 0;
 			to_payload('S', g_last_status, strlen(g_last_status));
 		}
@@ -3838,6 +4482,10 @@ extern "C" int main(int argc, char const* argv[]) {
 	pthread_t pthread_probe;
 	if (pthread_create(&pthread_probe, nullptr, close_probe_thread, nullptr) == 0) {
 		pthread_detach(pthread_probe);
+	}
+	pthread_t cthread;
+	if (pthread_create(&cthread, nullptr, cmd_udp_thread, nullptr) == 0) {
+		pthread_detach(cthread);
 	}
 	pthread_t lthread;
 	if (pthread_create(&lthread, nullptr, light_thread, nullptr) == 0) {

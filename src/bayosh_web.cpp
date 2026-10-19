@@ -17,12 +17,15 @@
 #include "bayosh.hpp"
 
 #include <algorithm>
+#include <map>
+#include <mutex>
 #include <arpa/inet.h>
 #include <cerrno>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <pthread.h>
@@ -141,8 +144,8 @@ std::string sites_json() {
 std::string state_json() {
 	const State st = get_state();
 	std::string j  = std::string("{\"enabled\":") + (st.enabled ? "true" : "false") + ",\"dim\":" + std::to_string(st.dim) + ",\"volume\":" + std::to_string(st.volume) +
-	                ",\"blur\":" + std::to_string(st.blur) + ",\"looks\":[" + std::to_string(st.looks[0]) + "," + std::to_string(st.looks[1]) + "," + std::to_string(st.looks[2]) + "," + std::to_string(st.looks[3]) + "]" + ",\"shuffle\":" + (st.shuffle ? "true" : "false") + ",\"mainvideo\":" + (st.main_video ? "true" : "false") + ",\"gamevideos\":" + (st.game_videos ? "true" : "false") + ",\"gamepause\":" + (st.game_pause ? "true" : "false") + ",\"menuhide\":" + (st.menu_hide ? "true" : "false") + ",\"storeonly\":" + (st.store_only ? "true" : "false") + ",\"parallax\":" + (st.parallax ? "true" : "false") + ",\"light\":" + (st.light ? "true" : "false") + ",\"guided\":" + (st.guided ? "true" : "false") + ",\"lightnow\":" + json_str(st.light_now) + ",\"lightmode\":" + json_str(st.light_mode) + ",\"lightfix\":" + json_str(st.light_fix) + ",\"lightspeed\":" + std::to_string(st.light_speed) +
-	                ",\"mods\":" + (menu_mods_present() ? "true" : "false") + ",\"dl\":" + download_json() + ",\"sites\":" + sites_json() + ",\"ip\":" + json_str(st.ip) + ",\"port\":" + std::to_string(kWebPort) + ",\"games\":" + json_str(games_text()) + ",\"game\":" + json_str(st.game) + ",\"status\":" + json_str(st.status) + ",\"current\":" + json_str(st.current) + ",\"videos\":[";
+	                ",\"blur\":" + std::to_string(st.blur) + ",\"looks\":[" + std::to_string(st.looks[0]) + "," + std::to_string(st.looks[1]) + "," + std::to_string(st.looks[2]) + "," + std::to_string(st.looks[3]) + "]" + ",\"shuffle\":" + (st.shuffle ? "true" : "false") + ",\"rotate\":" + std::to_string(st.rotate) + ",\"rotord\":" + (st.rot_order ? "1" : "0") + ",\"mainvideo\":" + (st.main_video ? "true" : "false") + ",\"gamevideos\":" + (st.game_videos ? "true" : "false") + ",\"gamepause\":" + (st.game_pause ? "true" : "false") + ",\"menuhide\":" + (st.menu_hide ? "true" : "false") + ",\"storeonly\":" + (st.store_only ? "true" : "false") + ",\"parallax\":" + (st.parallax ? "true" : "false") + ",\"light\":" + (st.light ? "true" : "false") + ",\"guided\":" + (st.guided ? "true" : "false") + ",\"lightnow\":" + json_str(st.light_now) + ",\"lightmode\":" + json_str(st.light_mode) + ",\"lightfix\":" + json_str(st.light_fix) + ",\"lightspeed\":" + std::to_string(st.light_speed) +
+	                ",\"mods\":" + (menu_mods_present() ? "true" : "false") + ",\"dl\":" + download_json() + ",\"sites\":" + sites_json() + ",\"widgets\":" + widgets_json() + ",\"ip\":" + json_str(st.ip) + ",\"port\":" + std::to_string(kWebPort) + ",\"games\":" + json_str(games_text()) + ",\"game\":" + json_str(st.game) + ",\"status\":" + json_str(st.status) + ",\"current\":" + json_str(st.current) + ",\"videos\":[";
 	for (size_t i = 0; i < st.videos.size(); ++i) {
 		const Video& v = st.videos[i];
 		j += (i ? ",{" : "{");
@@ -193,9 +196,24 @@ void reply_404(int fd) {
 	reply(fd, "404 Not Found", "text/plain", "not found", 9);
 }
 
+std::string url_decode(const std::string& raw);
 int index_arg(const std::string& query) {
-	const size_t pos = query.find("i=");
-	return pos == std::string::npos ? -1 : atoi(query.c_str() + pos + 2);
+	// v0.4: "n=<file name>" wins over "i=<index>": the list can change (a download, a conversion)
+	// between the page reading it and the request arriving, and an index would hit another video.
+	size_t np = query.rfind("n=", 0) == 0 ? 0 : query.find("&n=");
+	if (np != std::string::npos) {
+		np += query[np] == '&' ? 3 : 2;
+		const std::string name = url_decode(query.substr(np, query.find('&', np) - np));
+		const std::vector<Video> videos = list_videos();
+		for (size_t k = 0; k < videos.size(); ++k) {
+			if (videos[k].name == name) {
+				return static_cast<int>(k);
+			}
+		}
+		return -1;
+	}
+	const size_t pos = query.rfind("i=", 0) == 0 ? 0 : query.find("&i=");
+	return pos == std::string::npos ? -1 : atoi(query.c_str() + pos + (query[pos] == '&' ? 3 : 2));
 }
 
 bool video_at(int i, Video& out) {
@@ -445,6 +463,43 @@ bool from_lan(int fd) {
 	return getpeername(fd, reinterpret_cast<sockaddr*>(&peer), &len) == 0 && peer.sin_addr.s_addr != htonl(INADDR_LOOPBACK);
 }
 
+// v0.4: shows a wallpaper site's own page inside bayo.sh. The page is theirs, unchanged
+// (their scripts, their ads, their download button); a <base> keeps every link on their site and
+// a small hook passes the download window their button opens to bayo.sh, so the PS5 saves the file.
+constexpr const char* kSiteHosts[] = {"https://wallpaperwaifu.com/"};
+void serve_site_page(int fd, const std::string& path, const std::string& query) {
+	const size_t      at  = query.find("url=");
+	const std::string url = at == std::string::npos ? "" : url_decode(query.substr(at + 4));
+	bool allowed = false;
+	for (const char* h : kSiteHosts) {
+		allowed = allowed || url.rfind(h, 0) == 0;
+	}
+	if (path != "/page" || !allowed || url.find_first_of("\"'<> \r\n") != std::string::npos) {
+		reply_404(fd);
+		return;
+	}
+	std::string body, error;
+	if (!http_get(url, 3u * 1024 * 1024, body, error)) {
+		const std::string msg = "<!doctype html><meta charset=utf-8><body style=\"background:#111;color:#ddd;font:16px sans-serif;padding:40px\">No se pudo abrir la página: " + error + "</body>";
+		reply(fd, "200 OK", "text/html; charset=utf-8", msg.data(), msg.size());
+		return;
+	}
+	const std::string origin = url.substr(0, url.find('/', 8) + 1);
+	const std::string inject =
+	    "<base href=\"" + origin + "\"><script>(function(){var o=window.open;window.open=function(u){var s=String(u||'');"
+	    "if(/^https:\\/\\/go\\.wallpaperwaifu\\.com\\/download\\.php\\?/.test(s)&&window.parent!==window){window.parent.postMessage({bayoDl:s,page:'" + url + "'},'*');return null}"
+	    "return o.apply(window,arguments)};addEventListener('load',function(){var b=document.getElementById('wf-download');if(b&&b.scrollIntoView){b.scrollIntoView({block:'center'});try{b.focus()}catch(e){}}})})();</script>";
+	size_t h = body.find("<head");
+	h        = h == std::string::npos ? std::string::npos : body.find('>', h);
+	if (h == std::string::npos) {
+		body.insert(0, inject);
+	} else {
+		body.insert(h + 1, inject);
+	}
+	log("site page %s (%zu bytes)", url.c_str(), body.size());
+	reply(fd, "200 OK", "text/html; charset=utf-8", body.data(), body.size());
+}
+
 void handle(int fd) {
 	char          buf[4096];
 	const ssize_t n = recv(fd, buf, sizeof(buf) - 1, 0);
@@ -475,6 +530,14 @@ void handle(int fd) {
 	}
 
 	std::string error;
+	{
+		sockaddr_in la {};
+		socklen_t   ll = sizeof(la);
+		if (getsockname(fd, reinterpret_cast<sockaddr*>(&la), &ll) == 0 && ntohs(la.sin_port) == kSitePort) {
+			serve_site_page(fd, path, query);
+			return;
+		}
+	}
 	if (post) {
 		if (path == "/api/upload") {
 			save_upload(fd, query, headers, body, have);
@@ -523,6 +586,15 @@ void handle(int fd) {
 		const bool ok = video_at(index_arg(query), v) ? select_video(v.path, error) : (error = "No such video", false);
 		log("web: select %s -> %s", v.path.c_str(), ok ? "ok" : error.c_str());
 		reply_json(fd, result_json(ok, error));
+	} else if (path == "/api/rotate" || path == "/api/rotord") {
+		const size_t pos = query.find("v=");
+		const int    v   = pos == std::string::npos ? 0 : atoi(query.c_str() + pos + 2);
+		if (path == "/api/rotate") {
+			set_rotation(v, -1);
+		} else {
+			set_rotation(-1, v);
+		}
+		reply_json(fd, result_json(true, error));
 	} else if (path == "/api/dim") {
 		const size_t pos = query.find("v=");
 		set_dim(pos == std::string::npos ? 25 : atoi(query.c_str() + pos + 2));
@@ -621,8 +693,87 @@ void handle(int fd) {
 		} else {
 			const size_t      at  = query.find("url=");
 			const std::string url = at == std::string::npos ? "" : url_decode(query.substr(at + 4));
-			const bool        ok  = start_download(url, error);
+			const size_t      nm  = query.find("name=");
+			const std::string hint = nm == std::string::npos || nm > at ? "" : url_decode(query.substr(nm + 5, query.find('&', nm) - (nm + 5)));
+			const size_t      rf  = query.find("ref=");
+			const std::string ref = rf == std::string::npos || rf > at ? "" : url_decode(query.substr(rf + 4, query.find('&', rf) - (rf + 4)));
+			const bool        ok  = start_download(url, error, hint, ref);
 			reply_json(fd, result_json(ok, error));
+		}
+	} else if (path == "/api/widgets") {
+		// /api/widgets?k=on|weather|temp|disk|pad|city|lang|style|color&v=<value>
+		const size_t      kp = query.find("k="), vp = query.find("v=");
+		const std::string k  = kp == std::string::npos ? "" : query.substr(kp + 2, query.find('&', kp) - (kp + 2));
+		const std::string v  = vp == std::string::npos ? "" : url_decode(query.substr(vp + 2, query.find('&', vp) - (vp + 2)));
+		const bool        ok = widgets_set(k, v);
+		reply_json(fd, result_json(ok, ok ? "" : "Opción no válida"));
+	} else if (path == "/api/catalog") {
+		// v0.4 Descubrir: /api/catalog?url=<encoded catalog .json>. The PS5 fetches it (no CORS, works offline-phone).
+		const size_t      at  = query.find("url=");
+		const std::string url = at == std::string::npos ? "" : url_decode(query.substr(at + 4));
+		const bool        fresh = query.find("fresh=1") != std::string::npos;
+		static std::mutex mu;
+		static std::map<std::string, std::pair<time_t, std::string>> cache;
+		std::string body;
+		{
+			std::lock_guard<std::mutex> lock(mu);
+			auto it = cache.find(url);
+			if (!fresh && it != cache.end() && time(nullptr) - it->second.first < 900) {
+				body = it->second.second;
+			}
+		}
+		if (body.empty()) {
+			if (http_get(url, 4u * 1024 * 1024, body, error)) {
+				std::lock_guard<std::mutex> lock(mu);
+				if (cache.size() > 20) {
+					cache.clear();
+				}
+				cache[url] = {time(nullptr), body};
+				log("catalog %s: %zu bytes", url.c_str(), body.size());
+			}
+		}
+		if (body.empty()) {
+			reply_json(fd, result_json(false, error.empty() ? "Catálogo vacío" : error));
+		} else {
+			reply(fd, "200 OK", "application/json; charset=utf-8", body.data(), body.size());
+		}
+	} else if (path == "/api/img") {
+		// /api/img?url=<encoded image>: catalog thumbnails through the PS5 (cached in /data/bayosh/cache)
+		const size_t      at  = query.find("url=");
+		const std::string url = at == std::string::npos ? "" : url_decode(query.substr(at + 4));
+		uint32_t h = 2166136261u;
+		for (const char c : url) {
+			h = (h ^ static_cast<unsigned char>(c)) * 16777619u;
+		}
+		mkdir("/data/bayosh/cache", 0777);
+		char file[64];
+		snprintf(file, sizeof(file), "/data/bayosh/cache/%08x.img", h);
+		std::string body;
+		const int rf = open(file, O_RDONLY);
+		if (rf >= 0) {
+			std::string buf(32 * 1024, '\0');
+			ssize_t n;
+			while ((n = read(rf, &buf[0], buf.size())) > 0) {
+				body.append(buf.data(), static_cast<size_t>(n));
+			}
+			close(rf);
+		}
+		if (body.empty() && http_get(url, 3u * 1024 * 1024, body, error) && !body.empty()) {
+			const int wf = open(file, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+			if (wf >= 0) {
+				if (write(wf, body.data(), body.size()) != static_cast<ssize_t>(body.size())) {
+					unlink(file);
+				}
+				close(wf);
+			}
+		}
+		if (body.size() < 4) {
+			reply_404(fd);
+		} else {
+			const unsigned char* b = reinterpret_cast<const unsigned char*>(body.data());
+			const char* type = b[0] == 0x89 && b[1] == 'P' ? "image/png" : b[0] == 'G' && b[1] == 'I' ? "image/gif" :
+			                   b[0] == 'R' && b[1] == 'I' ? "image/webp" : "image/jpeg";
+			reply(fd, "200 OK", type, body.data(), body.size());
 		}
 	} else if (path == "/api/sites") {
 		// /api/sites?add=<encoded url>  |  ?del=<index>
@@ -673,7 +824,7 @@ void* connection_thread(void* arg) {
 	return nullptr;
 }
 
-int open_web_port() {
+int open_web_port(int port = kWebPort) {
 	const int s = socket(AF_INET, SOCK_STREAM, 0);
 	if (s < 0) {
 		log("web: socket failed (errno %d)", errno);
@@ -683,20 +834,21 @@ int open_web_port() {
 	setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
 	sockaddr_in addr     = {};
 	addr.sin_family      = AF_INET;
-	addr.sin_port        = htons(kWebPort);
+	addr.sin_port        = htons(static_cast<uint16_t>(port));
 	addr.sin_addr.s_addr = htonl(INADDR_ANY);
 	if (bind(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0 || listen(s, 8) != 0) {
-		log("web: port %d unavailable (errno %d)", kWebPort, errno);
+		log("web: port %d unavailable (errno %d)", port, errno);
 		close(s);
 		return -1;
 	}
 	timeval tv {1, 0}; // accept wakes up every second: rest mode / reopen checks
 	setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-	log("web: window on port %d", kWebPort);
+	log("web: %s on port %d", port == kWebPort ? "window" : "site pages", port);
 	return s;
 }
 
-void* server_thread(void*) {
+void* server_thread(void* arg) {
+	const int port = arg != nullptr ? static_cast<int>(reinterpret_cast<intptr_t>(arg)) : kWebPort;
 	// Rest mode kills listening sockets (user report: the window was dead after waking the PS5):
 	// when accept keeps failing, open the port again.
 	int s = -1, fails = 0, epoch = net_epoch();
@@ -708,7 +860,7 @@ void* server_thread(void*) {
 		}
 		if (s < 0) {
 			epoch = net_epoch();
-			s     = open_web_port();
+			s     = open_web_port(port);
 			if (s < 0) {
 				sleep(2);
 				continue;
@@ -733,8 +885,15 @@ void* server_thread(void*) {
 		setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 		setsockopt(c, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 		// One thread per connection: a video stream must not hold up the page's API calls.
-		pthread_t t;
-		if (pthread_create(&t, nullptr, connection_thread, reinterpret_cast<void*>(static_cast<intptr_t>(c))) == 0) {
+		// v0.4: catalogs and site pages run HTTPS inside this thread (sceHttp2 + TLS need a deep
+		// stack); the default thread stack is small and overflowed, killing the whole payload.
+		pthread_t      t;
+		pthread_attr_t attr;
+		pthread_attr_init(&attr);
+		pthread_attr_setstacksize(&attr, 512 * 1024);
+		const int rc = pthread_create(&t, &attr, connection_thread, reinterpret_cast<void*>(static_cast<intptr_t>(c)));
+		pthread_attr_destroy(&attr);
+		if (rc == 0) {
 			pthread_detach(t);
 		} else {
 			handle(c);
@@ -752,6 +911,12 @@ void start_web_server() {
 		pthread_detach(t);
 	} else {
 		log("web: thread start failed");
+	}
+	// v0.4: wallpaper site pages on their own port (another origin: their scripts and ads
+	// cannot reach the bayo.sh API on 9050).
+	pthread_t t2;
+	if (pthread_create(&t2, nullptr, server_thread, reinterpret_cast<void*>(static_cast<intptr_t>(kSitePort))) == 0) {
+		pthread_detach(t2);
 	}
 }
 

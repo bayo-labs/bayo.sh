@@ -1,5 +1,59 @@
 # Cambios
 
+## v0.4.0 — 2026-10-19
+- **Widgets en el inicio**: tarjeta "cristal neón" sobre tu fondo con 4 filas.
+  - **Clima**: de tu ciudad o colonia, o detectado solo por tu red. Usa Open-Meteo; las colonias y
+    direcciones se buscan en OpenStreetMap.
+  - **Temperatura del PS5**, **espacio libre** y **batería del control** (se lee del sistema).
+  - Los datos se mueven: la tarjeta sube al aparecer, cada fila alterna su información y entra
+    deslizándose, y los puntos laten.
+  - El color de cada fila cambia con el cielo, el calor de la consola, el espacio y la batería baja.
+  - **Contorno animado**: Ola (los colores de tus fondos, como la luz del control), Neón, Arcoíris,
+    Sigue al fondo, Fijo, Respiración o sin contorno.
+  - Todo se configura en **Ajustes → Widgets del inicio**.
+- **WallpaperWaifu en Descubrir**: lista, categorías, búsqueda y filtro 1080p. "Descargar" abre la
+  página del fondo y, al picar su botón verde, el PS5 baja el archivo a tus fondos.
+- **HTTPS propio** (Mbed TLS + certificados de certifi): catálogos, miniaturas y descargas desde
+  sitios https funcionan dentro del PS5.
+- **QR** con la dirección del PS5 al inicio de la guía y en Inicio → Desde tu celular.
+- **Apoya el proyecto** en Ajustes.
+- Arreglos:
+  - La configuración y los widgets se guardan de forma segura (archivo temporal, fsync y
+    renombrar); config.bak solo se reescribe cuando cambia un ajuste.
+  - Miniaturas y colores duplicados entre videos (dos "Ronin"): se piden por nombre y los duplicados
+    viejos se borran al arrancar.
+  - Descargas más rápidas (escrituras de 1 MB y búfer de red grande) y el progreso ya no se atrasa en
+    la ventana del PS5.
+  - Si la inyección al menú falla, se reintenta hasta 3 veces.
+  - Batería del control: se toma el control real (antes podía marcar 100 % con otro dispositivo).
+
+### Descubrir (primera parte de la v0.4)
+- Nueva pestaña **Descubrir**: fondos animados listos para el PS5, con buscador, categorías,
+  páginas y botones **Descargar → Usar** sin salir de la app (también desde el celular o la PC).
+  - Trae el **catálogo de bayo.sh** con fondos originales hechos para el proyecto (1080p30, en bucle).
+  - **Agregar catálogo**: cualquiera puede publicar un catálogo `.json` (formato en
+    `catalog/README.md`) y pegar su enlace; se guarda en el PS5.
+  - El PS5 baja el catálogo y las miniaturas (con caché), así funciona igual en la ventana del PS5.
+  - Los videos se guardan con el nombre del fondo (por ejemplo `aurora-boreal.mp4`).
+- "Conseguir fondos" pasa a Descubrir → **Más fuentes**.
+
+Incluye todo lo de la v0.3.2 (no publicada por separado):
+- Arranca más rápido: el fondo aparece en ~4–5 s en vez de ~8 s.
+  - El módulo se reporta cada 1 s (antes 2.1 s), así la revisión de "ya hay una bayo.sh dentro"
+    dura 2.3 s en vez de 3.
+  - El primer video se pide a los 1.5 s (antes 3 s).
+  - El cuadro del inicio ya no se vuelve a registrar si existe y no cambió (~3 s menos de trabajo).
+- Aviso inmediato "bayo.sh iniciando…" al lanzar el .elf.
+- Fondos → **Cambiar fondo cada…** No / 5 / 15 / 30 min / 1 h, en orden **Aleatorio** o **En orden**.
+  No cambia mientras juegas y se salta los videos no compatibles (el aleatorio al arrancar también).
+- La luz del control viene **encendida por defecto**; si la apagas con el switch, se queda apagada.
+- Luz del control y comandos van al módulo por UDP (127.0.0.1:9053), ya no por archivos en
+  /system_tmp, que suele estar lleno: la luz enciende al arrancar y el fondo no se queda sin espacio.
+- config.txt conserva las opciones que esta versión no conoce (una versión anterior ya no borra,
+  por ejemplo, "Cambiar fondo cada…").
+- Cerrar: intenta cerrar la ventana con ExitApp() si es la última app del menú (BYSH00001). En la
+  prueba la lista de apps estaba vacía, así que sigue regresando al inicio; se investiga aparte.
+
 ## v0.3.1 — 2026-10-17
 - **Convertir y aplicar**: sube cualquier video (4K, 60+ fps, HEVC, .mov, .mkv, .webm…) desde el
   celular o la PC; si el PS5 no lo puede mostrar, la página lo convierte a 1080p H.264 ahí mismo

@@ -28,15 +28,23 @@ sed -i -E 's/^add_subdirectory\((util|daemon|bootstrapper|unpacker)\)/# &/' "$TR
 grep -q '^add_subdirectory(bayosh)' "$TREE/source/CMakeLists.txt" || echo 'add_subdirectory(bayosh)' >> "$TREE/source/CMakeLists.txt"
 mkdir -p "$TREE/.cache/dependencies" && touch "$TREE/.cache/dependencies/kstuff.elf"
 
+# mbedTLS (Apache-2.0) para HTTPS: se descarga una vez en third_party/ (no va en el repo).
+MBEDTLS="$HERE/third_party/mbedtls"
+if [ ! -f "$MBEDTLS/include/mbedtls/ssl.h" ]; then
+	rm -rf "$MBEDTLS" && mkdir -p "$HERE/third_party"
+	git clone -q --depth 1 --branch v3.6.2 https://github.com/Mbed-TLS/mbedtls.git "$MBEDTLS"
+fi
+
 rm -rf "$DEST" && mkdir -p "$DEST"
 cp "$HERE"/src/* "$DEST/"
 cp "$HERE/assets/icon0.png" "$DEST/icon0.png"
+cp "$HERE/assets/cacert.pem" "$DEST/cacert.pem"
 
 export PS5_PAYLOAD_SDK="$SDK"
 [ -d /usr/lib/llvm-18/bin ] && export PATH="/usr/lib/llvm-18/bin:$PATH"
 
 "$SDK/bin/prospero-cmake" -S "$TREE/source" -B "$BUILD" -G Ninja -DCMAKE_BUILD_TYPE=Release \
-	-DONIONHEN_KSTUFF_ELF="$TREE/.cache/dependencies/kstuff.elf" -DPS5_PAYLOAD_SDK="$SDK" \
+	-DONIONHEN_KSTUFF_ELF="$TREE/.cache/dependencies/kstuff.elf" -DPS5_PAYLOAD_SDK="$SDK" -DBAYOSH_MBEDTLS_DIR="$MBEDTLS" \
 	> "$BUILD.configure.log" 2>&1 || { tail -30 "$BUILD.configure.log"; exit 1; }
 
 if ! cmake --build "$BUILD" -j"$(nproc)" --target bayosh > "$BUILD.log" 2>&1; then

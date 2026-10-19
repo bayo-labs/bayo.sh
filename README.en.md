@@ -7,7 +7,7 @@
 <p align="center"><b>Animated video wallpapers for your PS5 home screen.</b></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.3.1-22b8ff?style=flat-square" alt="version">
+  <img src="https://img.shields.io/badge/version-0.4.0-22b8ff?style=flat-square" alt="version">
   <img src="https://img.shields.io/badge/platform-PS5-22b8ff?style=flat-square" alt="platform">
   <img src="https://img.shields.io/badge/tested-13.60%20%2B%20etaHEN-22b8ff?style=flat-square" alt="tested">
   <img src="https://img.shields.io/badge/license-GPL--3.0-22b8ff?style=flat-square" alt="license">
@@ -32,6 +32,12 @@
 - **Controller light**: the DualSense LED follows your wallpaper's color, or use Solid, Rainbow, Breathing or Wave modes.
 - **Any video**: if it is not compatible (4K, HEVC, 60+ fps…), the **Convert and apply** button turns it into 1080p from your phone or PC.
 - **Download from a link**: paste an .mp4 link and the PS5 downloads it to your wallpapers.
+- **Discover**: a catalog of animated wallpapers with search and categories; **Download → Use** without leaving the app.
+- **WallpaperWaifu in Discover**: browse their wallpapers (categories, search, 1080p filter) and press their green download button; the PS5 saves it to your wallpapers.
+- **Home screen widgets**: a glass card with your city's weather (or detected automatically), PS5 temperature, free space and controller battery. The data moves and changes colour, and the outline glows in Wave, Neon, Rainbow, Follow, Solid or Breathing mode.
+- **QR for your phone**: scan it from the guide or the home tab and the app opens on your phone.
+- **Your own catalogs**: publish a `.json` with your wallpapers and anyone can add it with its link ([format](catalog/README.md)).
+- **Rotation**: change the wallpaper every 5, 15, 30 min or 1 h, shuffled or in order.
 - **Your wallpaper sites**: add the pages or repos you like; they are saved on the PS5.
 - **Background music** on the phone/PC page (original dark fantasy track, one tap to turn off).
 - **First-run guide** inside the app.
@@ -82,11 +88,13 @@ The result is `dist/bayosh.elf`. The script applies `patches/onionhen-detour.pat
 | `src/bayosh_shellui.cpp` | The module that runs inside the PS5 menu and plays the wallpaper video |
 | `src/bayosh_web.cpp` | Web server on port 9050 (the app and the phone page) |
 | `src/bayosh_tile.cpp` | The app's tile on the home screen |
+| `src/bayosh_widgets.cpp` | Home screen widgets (weather, temperature, storage, battery) |
+| `src/bayosh_tls.cpp` | Built-in HTTPS with Mbed TLS (catalogs, downloads, weather) |
 | `src/bayosh_page.html` | The interface (PS5, PC and phone) |
 
 ### API (port 9050)
 
-`/api/state`, `/api/select?i=`, `/api/on`, `/api/off`, `/api/dim?v=`, `/api/volume?v=`, `/api/blur?v=`, `/api/look?k=&v=`, `/api/set?k=&v=`, `/api/games`, `/api/gamebg?tid=&i=`, `/api/delete?i=`, `POST /api/upload?name=`, `/api/reset`, `/api/shutdown`, `/video?i=`, `/thumb?i=`, `/gameicon?tid=`.
+`/api/state`, `/api/select?i=`, `/api/on`, `/api/off`, `/api/dim?v=`, `/api/volume?v=`, `/api/blur?v=`, `/api/look?k=&v=`, `/api/set?k=&v=`, `/api/games`, `/api/gamebg?tid=&i=`, `/api/delete?i=`, `POST /api/upload?name=`, `/api/reset`, `/api/shutdown`, `/api/catalog?url=`, `/api/img?url=`, `/api/download?url=&name=`, `/api/widgets?k=&v=`, `/video?i=`, `/thumb?i=`, `/gameicon?tid=`.
 
 ## Bug reports and ideas
 
@@ -105,6 +113,8 @@ A ⭐ on the repo or sharing it helps a lot too.
 Made by **Josué** · BayoTech.
 
 bayo.sh is a derivative project. The video engine starts from **LiveShell** by ZiZc3 and uses the injector, libraries and groundwork of **[OnionHEN](https://github.com/aydencharles/onionHEN/)**. bayo.sh's changes are listed in [CHANGELOG.md](CHANGELOG.md) (Spanish).
+
+It also uses: [Mbed TLS](https://github.com/Mbed-TLS/mbedtls) (Apache-2.0), root certificates from [certifi](https://github.com/certifi/python-certifi) (MPL-2.0), [qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator) by Kazuhiko Arase (MIT), weather from [Open-Meteo](https://open-meteo.com/) (CC BY 4.0), place search from [OpenStreetMap / Nominatim](https://nominatim.openstreetmap.org/) (© OpenStreetMap contributors, ODbL) and approximate location from [GeoJS](https://www.geojs.io/). WallpaperWaifu wallpapers belong to their authors and are downloaded from their page.
 
 ## License
 

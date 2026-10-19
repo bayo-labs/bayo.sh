@@ -86,6 +86,7 @@ constexpr const char* kMenusFile      = "/system_tmp/bayosh/menus.txt";
 constexpr const char* kStoreOnlyFile  = "/system_tmp/bayosh/storeonly.txt";
 constexpr const char* kLooksFile      = "/system_tmp/bayosh/looks.txt";
 constexpr const char* kLightFile      = "/system_tmp/bayosh/light.txt"; // RRGGBB or off (ShellUI module)
+constexpr const char* kCmdFile        = "/system_tmp/bayosh/cmd.txt";   // v0.3.2: one-shot commands for the module ("exitapp <n>")
 constexpr const char* kGuideFile      = "/data/bayosh/guide_done";
 constexpr const char* kParallaxFile   = "/system_tmp/bayosh/parallax.txt";
 constexpr const char* kLogFile        = "/data/bayosh/bayosh.log";
@@ -111,13 +112,16 @@ int         g_volume   = 100;   // sound of clips that have it, 0..100 %
 int         g_blur     = 0;     // 0 off, 1 light, 2 strong
 int         g_looks[4] = {0, 0, 0, 0}; // bottom fade, top fade, vignette, haze: 0 off, 1 light, 2 strong
 bool        g_shuffle  = false; // a random clip each time the payload starts (off by default)
+int         g_rotate   = 0;     // v0.3.2: change the wallpaper every N minutes (0 = never)
+bool        g_rot_order = false; // false: random, true: in list order
+time_t      g_rot_last = 0;     // last time the main wallpaper changed (rotation timer)
 bool        g_main_video = true; // off = only tiles with their own video play one
 bool        g_game_videos = true; // off = per-game videos ignored (games.txt kept)
 bool        g_game_pause = true; // no video while a game runs
 bool        g_menu_hide  = true;  // hide the video in Settings / system apps (default: safer)
 bool        g_store_only = false; // video only while the PS Store tile is highlighted (off by default)
 bool        g_parallax   = false; // nudge the video when moving between home tiles
-bool        g_light      = false; // controller light bar follows the clip's colour (experimental, off by default)
+bool        g_light      = true; // v0.3.2: on by default (the switch still turns it off and it stays off)
 std::string g_light_now  = "off"; // last value written to kLightFile
 std::string g_light_mode = "follow"; // follow | fixed | rainbow | breathe | wave
 std::string g_light_fix  = "22b8ff";
@@ -376,9 +380,51 @@ void write_looks() {
 	write_text(kLooksFile, looks_text() + "\n");
 }
 
+std::string g_config_extra; // lines of config.txt this version does not know: kept as they are
+
+// v0.3.2: messages to the ShellUI module (UDP 127.0.0.1:9053), no file space needed.
+//   "L <light request>" (repeated while it matters)   "X exitapp <n>"
+void send_module(const std::string& msg) {
+	static int s = -1;
+	if (s < 0) {
+		s = socket(AF_INET, SOCK_DGRAM, 0);
+	}
+	if (s < 0) {
+		return;
+	}
+	sockaddr_in to {};
+	to.sin_family      = AF_INET;
+	to.sin_port        = htons(9053);
+	to.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	sendto(s, msg.data(), msg.size(), 0, reinterpret_cast<sockaddr*>(&to), sizeof(to));
+}
+
 void load_config() {
-	const std::string text = read_text(kConfigFile);
+	{
+		struct stat a {}, b {};
+		const int ra = stat(kConfigFile, &a), ea = errno;
+		const int rb = stat("/data/bayosh/config.bak", &b), eb = errno;
+		log("config: config.txt %s %lld bytes, config.bak %s %lld bytes", ra == 0 ? "found" : ("missing (errno " + std::to_string(ea) + ")").c_str(),
+		    static_cast<long long>(ra == 0 ? a.st_size : 0), rb == 0 ? "found" : ("missing (errno " + std::to_string(eb) + ")").c_str(),
+		    static_cast<long long>(rb == 0 ? b.st_size : 0));
+	}
+	std::string text = read_text(kConfigFile, 16384);
+	// v0.4: the settings were found reset at start ("video=" empty, rotation back to off) with no
+	// trace of who emptied the file; every save also writes config.bak, used when config.txt is
+	// missing or has no "enabled=" line.
+	const bool from_bak = text.find("enabled=") == std::string::npos;
+	if (from_bak) {
+		const std::string bak = read_text("/data/bayosh/config.bak", 16384);
+		log("config: config.txt has %zu bytes without settings, config.bak %zu bytes", text.size(), bak.size());
+		if (bak.find("enabled=") != std::string::npos) {
+			text = bak;
+		}
+	}
 	size_t            pos  = 0;
+	g_config_extra.clear();
+	static const char* const kKnown[] = {"enabled=", "video=", "dim=", "volume=", "blur=", "looks=", "shuffle=", "rotate=",
+	                                     "rotorder=", "mainvideo=", "gamevideos=", "gamepause=", "menuhide=", "storeonly=",
+	                                     "parallax=", "light=", "lightmode=", "lightfix=", "lightspeed="};
 	while (pos < text.size()) {
 		const size_t      end  = text.find('\n', pos);
 		const std::string line = first_line(text.substr(pos, end == std::string::npos ? std::string::npos : end - pos));
@@ -404,6 +450,10 @@ void load_config() {
 			// ignored: the "Main video" switch was removed (it is always on)
 		} else if (line.rfind("shuffle=", 0) == 0) {
 			g_shuffle = line.substr(8) != "0";
+		} else if (line.rfind("rotate=", 0) == 0) {
+			g_rotate = std::max(0, std::min(1440, atoi(line.c_str() + 7)));
+		} else if (line.rfind("rotorder=", 0) == 0) {
+			g_rot_order = line.substr(9) == "order";
 		} else if (line.rfind("parallax=", 0) == 0) {
 			g_parallax = line.substr(9) != "0";
 		} else if (line.rfind("menuhide=", 0) == 0) {
@@ -424,10 +474,20 @@ void load_config() {
 		if (end == std::string::npos) {
 			break;
 		}
+		{
+			bool known = line.empty();
+			for (const char* kk : kKnown) {
+				known = known || line.rfind(kk, 0) == 0;
+			}
+			if (!known && line.find('=') != std::string::npos && g_config_extra.size() < 4096) {
+				g_config_extra += line + "\n";
+			}
+		}
 		pos = end + 1;
 	}
-	log("config: enabled=%d video=%s dim=%d shuffle=%d gamepause=%d", g_enabled ? 1 : 0, g_current.c_str(), g_dim,
-	    g_shuffle ? 1 : 0, g_game_pause ? 1 : 0);
+	log("config: %zu bytes%s, enabled=%d video=%s dim=%d shuffle=%d rotate=%d gamepause=%d", text.size(),
+	    from_bak ? " (from config.bak)" : "", g_enabled ? 1 : 0, g_current.c_str(), g_dim, g_shuffle ? 1 : 0, g_rotate,
+	    g_game_pause ? 1 : 0);
 	write_text(kDimFile, std::to_string(g_dim) + "\n");
 	write_text(kVolumeFile, std::to_string(g_volume) + "\n");
 	write_text(kBlurFile, std::to_string(g_blur) + "\n");
@@ -437,9 +497,73 @@ void load_config() {
 	write_text(kParallaxFile, g_parallax ? "1\n" : "0\n");
 }
 
+std::string g_bak_settings; // what config.bak holds (without the video line)
 void save_config() {
-	write_text(kConfigFile, std::string("enabled=") + (g_enabled ? "1" : "0") + "\nvideo=" + g_current + "\ndim=" + std::to_string(g_dim) + "\nvolume=" + std::to_string(g_volume) + "\nblur=" + std::to_string(g_blur) + "\nlooks=" + looks_text() +
-	                            "\nshuffle=" + (g_shuffle ? "1" : "0") + "\nmainvideo=" + (g_main_video ? "1" : "0") + "\ngamevideos=" + (g_game_videos ? "1" : "0") + "\ngamepause=" + (g_game_pause ? "1" : "0") + "\nmenuhide=" + (g_menu_hide ? "1" : "0") + "\nstoreonly=" + (g_store_only ? "1" : "0") + "\nparallax=" + (g_parallax ? "1" : "0") + "\nlight=" + (g_light ? "1" : "0") + "\nlightmode=" + g_light_mode + "\nlightfix=" + g_light_fix + "\nlightspeed=" + std::to_string(g_light_speed) + "\n");
+	const std::string text = g_config_extra + std::string("enabled=") + (g_enabled ? "1" : "0") + "\nvideo=" + g_current + "\ndim=" + std::to_string(g_dim) + "\nvolume=" + std::to_string(g_volume) + "\nblur=" + std::to_string(g_blur) + "\nlooks=" + looks_text() +
+	                            "\nshuffle=" + (g_shuffle ? "1" : "0") + "\nrotate=" + std::to_string(g_rotate) + "\nrotorder=" + (g_rot_order ? "order" : "random") + "\nmainvideo=" + (g_main_video ? "1" : "0") + "\ngamevideos=" + (g_game_videos ? "1" : "0") + "\ngamepause=" + (g_game_pause ? "1" : "0") + "\nmenuhide=" + (g_menu_hide ? "1" : "0") + "\nstoreonly=" + (g_store_only ? "1" : "0") + "\nparallax=" + (g_parallax ? "1" : "0") + "\nlight=" + (g_light ? "1" : "0") + "\nlightmode=" + g_light_mode + "\nlightfix=" + g_light_fix + "\nlightspeed=" + std::to_string(g_light_speed) + "\n";
+	// v0.4: after a reboot both files were found empty (the data never reached the disk before the
+	// console went down; the rotation rewrites the config every few minutes). Write a temporary file,
+	// flush it, rename it over. config.bak is the safe copy: it is only rewritten when a SETTING
+	// changes (not the clip the rotation picked), so a crash right after a rotation cannot take it too.
+	auto settings_only = [](const std::string& t) {
+		const size_t v = t.find("video=");
+		return v == std::string::npos ? t : t.substr(0, v) + t.substr(t.find('\n', v) == std::string::npos ? t.size() : t.find('\n', v) + 1);
+	};
+	const std::string settings = settings_only(text);
+	const bool        bak_too  = settings != g_bak_settings;
+	for (const char* path : {kConfigFile, "/data/bayosh/config.bak"}) {
+		if (path != kConfigFile && !bak_too) {
+			continue;
+		}
+		const std::string tmp = std::string(path) + ".tmp";
+		const int         fd  = open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0666);
+		bool              ok  = fd >= 0 && write(fd, text.data(), text.size()) == static_cast<ssize_t>(text.size());
+		if (fd >= 0) {
+			ok = fsync(fd) == 0 && ok;
+			close(fd);
+		}
+		if (!ok || rename(tmp.c_str(), path) != 0) {
+			log("config: could not save %s (errno %d)", path, errno);
+			unlink(tmp.c_str());
+		} else if (path != kConfigFile) {
+			g_bak_settings = settings;
+		}
+	}
+	const int dir = open("/data/bayosh", O_RDONLY);
+	if (dir >= 0) {
+		fsync(dir); // the rename itself
+		close(dir);
+	}
+	sync();
+}
+
+// v0.4: a race in older pages saved one clip's thumbnail (and light colour) under another clip.
+// Identical thumbnails are dropped so the page measures both clips again.
+void drop_duplicate_thumbs(const std::vector<Video>& videos) {
+	std::vector<std::pair<std::string, std::string>> thumbs; // png path, content
+	for (const Video& v : videos) {
+		const std::string png = v.path.substr(0, v.path.rfind('.')) + ".png";
+		std::string       data = read_text(png.c_str(), 2 * 1024 * 1024);
+		if (!data.empty()) {
+			thumbs.emplace_back(png, std::move(data));
+		}
+	}
+	std::vector<bool> drop(thumbs.size(), false);
+	for (size_t a = 0; a < thumbs.size(); ++a) {
+		for (size_t b = a + 1; b < thumbs.size(); ++b) {
+			if (thumbs[a].second == thumbs[b].second) {
+				drop[a] = drop[b] = true;
+			}
+		}
+	}
+	for (size_t i = 0; i < thumbs.size(); ++i) {
+		if (drop[i]) {
+			const std::string base = thumbs[i].first.substr(0, thumbs[i].first.size() - 4);
+			unlink(thumbs[i].first.c_str());
+			unlink((base + ".color").c_str());
+			log("thumbs: %s was a copy of another clip's, measured again", thumbs[i].first.c_str());
+		}
+	}
 }
 
 // ---- telling ShellUI what to play ------------------------------------------------------------
@@ -545,6 +669,8 @@ void* ui_thread(void*) {
 			std::lock_guard<std::mutex> lock(g_ui_lock);
 			(buf[0] == 'S' ? g_ui_status : g_ui_focus).assign(buf + 1, static_cast<size_t>(n - 1));
 			(buf[0] == 'S' ? g_ui_status_set : g_ui_focus_set) = true;
+		} else if (buf[0] == 'B') {
+			widgets_battery(std::string(buf + 1, static_cast<size_t>(n - 1)));
 		} else if (buf[0] == 'L' && lf >= 0) {
 			struct stat st {};
 			if (fstat(lf, &st) == 0 && st.st_size > 2 * 1024 * 1024) {
@@ -891,7 +1017,7 @@ pid_t inject_shellui() {
 	// v0.3: a bayo.sh module from an earlier start may still live in this ShellUI (marker lost). It
 	// reports its status every ~2 s on our channel: if anything arrives, do not inject a second one.
 	const long heard0 = g_ui_bytes; // only what arrives now counts (a module of an older, dead ShellUI is silent)
-	for (int i = 0; i < 30 && g_ui_bytes == heard0; ++i) {
+	for (int i = 0; i < 23 && g_ui_bytes == heard0; ++i) { // v0.3.2: 2.3 s (modules beat every 1 s, older ones every 2.1 s)
 		usleep(100 * 1000);
 	}
 	if (g_ui_bytes != heard0) {
@@ -903,7 +1029,15 @@ pid_t inject_shellui() {
 	unlink(kStatusFile);
 	ui_forget_status();
 	log("injecting into SceShellUI pid %d", static_cast<int>(pid));
-	if (!Inject_Toolbox(static_cast<int>(pid), bayosh_shellui_elf_start)) {
+	// v0.4: a one-off "bootstrap mprotect failed" was seen right after boot; the module never started,
+	// so trying again a moment later is safe.
+	bool injected = Inject_Toolbox(static_cast<int>(pid), bayosh_shellui_elf_start);
+	for (int attempt = 2; !injected && attempt <= 3; ++attempt) {
+		log("injection failed, trying again (%d/3)", attempt);
+		usleep(1500 * 1000);
+		injected = Inject_Toolbox(static_cast<int>(pid), bayosh_shellui_elf_start);
+	}
+	if (!injected) {
 		log("injection FAILED");
 		notify("bayo.sh no pudo arrancar (falló la conexión con el menú).");
 		return -1;
@@ -1173,6 +1307,10 @@ void start_thread(void* (*fn)(void*)) {
 
 } // namespace
 
+void module_send(const std::string& msg) {
+	send_module(msg);
+}
+
 // ---- shared API ------------------------------------------------------------------------------
 
 void log(const char* fmt, ...) {
@@ -1314,6 +1452,8 @@ State get_state() {
 			st.looks[l] = g_looks[l];
 		}
 		st.shuffle    = g_shuffle;
+		st.rotate     = g_rotate;
+		st.rot_order  = g_rot_order;
 		st.main_video = g_main_video;
 		st.game_videos = g_game_videos;
 		st.game_pause = g_game_pause;
@@ -1333,15 +1473,18 @@ State get_state() {
 	return st;
 }
 
-bool select_video(const std::string& path, std::string& error) {
+bool select_video(const std::string& path, std::string& error, bool save) {
 	if (!exists(path.c_str())) {
 		error = "That video is gone";
 		return false;
 	}
 	std::lock_guard<std::mutex> lock(g_ctl);
-	g_current = path;
-	g_enabled = true;
-	save_config(); // g_override stays: a highlighted game's own clip wins over the main video
+	g_current  = path;
+	g_enabled  = true;
+	g_rot_last = time(nullptr); // the rotation timer counts from the last change
+	if (save) {
+		save_config(); // g_override stays: a highlighted game's own clip wins over the main video
+	}
 	return apply_locked(error);
 }
 
@@ -1395,6 +1538,69 @@ bool set_enabled(bool on, std::string& error) {
 	}
 	save_config();
 	return apply_locked(error);
+}
+
+void set_rotation(int minutes, int order) {
+	std::lock_guard<std::mutex> lock(g_ctl);
+	if (minutes >= 0) {
+		g_rotate   = std::max(0, std::min(1440, minutes));
+		g_rot_last = time(nullptr);
+	}
+	if (order >= 0) {
+		g_rot_order = order == 1;
+	}
+	save_config();
+	log("rotation: every %d min, %s", g_rotate, g_rot_order ? "in order" : "random");
+}
+
+// v0.3.2: change the main wallpaper every N minutes while bayo.sh runs (not during games).
+void* rotate_thread(void*) {
+	srand(static_cast<unsigned>(time(nullptr)) ^ 0x5eed);
+	g_rot_last = time(nullptr);
+	while (g_running) {
+		sleep(5);
+		int  every;
+		bool order, busy;
+		std::string cur;
+		{
+			std::lock_guard<std::mutex> lock(g_ctl);
+			every = g_rotate;
+			order = g_rot_order;
+			busy  = !g_enabled || !g_injected || g_game_running;
+			cur   = g_current;
+		}
+		if (every <= 0 || busy || time(nullptr) - g_rot_last < every * 60) {
+			continue;
+		}
+		std::vector<std::string> ok;
+		for (const Video& v : list_videos()) {
+			if (mp4_check(v.path).ok) {
+				ok.push_back(v.path);
+			}
+		}
+		g_rot_last = time(nullptr);
+		if (ok.size() < 2) {
+			continue;
+		}
+		std::string next;
+		if (order) {
+			size_t i = 0;
+			while (i < ok.size() && ok[i] != cur) {
+				++i;
+			}
+			next = ok[(i + 1) % ok.size()];
+		} else {
+			do {
+				next = ok[static_cast<size_t>(rand()) % ok.size()];
+			} while (next == cur);
+		}
+		std::string error;
+		log("rotation: %s", next.c_str());
+		if (!select_video(next, error)) {
+			log("rotation: %s", error.c_str());
+		}
+	}
+	return nullptr;
 }
 
 bool set_option(const std::string& key, bool on, std::string& error) {
@@ -1507,6 +1713,8 @@ bool reset_settings(std::string& error) {
 	}
 	write_looks();
 	g_shuffle    = false;
+	g_rotate     = 0;
+	g_rot_order  = false;
 	g_main_video = true;
 	g_game_videos = true;
 	g_game_pause = true;
@@ -1515,7 +1723,7 @@ bool reset_settings(std::string& error) {
 	write_text(kStoreOnlyFile, "0\n");
 	g_parallax   = false;
 	write_text(kParallaxFile, "0\n");
-	g_light      = false;
+	g_light      = true;
 	g_light_mode = "follow";
 	g_light_fix  = "22b8ff";
 	g_light_speed = 1;
@@ -1608,13 +1816,18 @@ void request_shutdown(bool full) {
 	g_full_close     = full;
 	g_stop_requested = true;
 	if (!full) {
-		go_home(); // leave the window right away; the engine winds down behind the home screen
+		// v0.3.2: the window is a ShellApp inside ShellUI; the module closes it (ExitApp) if the last
+		// app is ours. Going home stays as the fallback.
+		send_module("X exitapp " + std::to_string(static_cast<long long>(time(nullptr))));
+		usleep(900 * 1000);
+		go_home();
 	}
 	g_running        = false;
 }
 
 // Per-game backgrounds: /data/bayosh/games.txt, one "TITLEID=/path/clip.mp4" per line.
 constexpr const char* kGamesFile = "/data/bayosh/games.txt";
+
 
 std::string games_text() {
 	return read_text(kGamesFile, 64 * 1024);
@@ -2001,6 +2214,36 @@ bool set_light_mode(const std::string& mode, const std::string& rgb, int speed) 
 	return true;
 }
 
+// v0.4 widgets: colours for the card's outline. "wave" = the wallpapers' colours (like the light bar),
+// "follow" = the current wallpaper's colour. Space separated RRGGBB.
+std::string widget_colors(const std::string& style) {
+	if (style == "wave") {
+		std::string list;
+		int         n = 0;
+		for (const Video& v : list_videos()) {
+			const std::string vc = clip_color(v.path);
+			if (!vc.empty() && list.find(vc) == std::string::npos && n < 6) {
+				list += (list.empty() ? "" : " ") + vc;
+				++n;
+			}
+		}
+		for (const char* d : {"ff3d9a", "22b8ff", "7cff00"}) {
+			if (n < 3 && list.find(d) == std::string::npos) {
+				list += (list.empty() ? "" : " ") + std::string(d);
+				++n;
+			}
+		}
+		return list;
+	}
+	if (style == "follow") {
+		std::lock_guard<std::mutex> lock(g_ctl);
+		const std::string clip = !g_override.empty() ? g_override : g_current;
+		const std::string c    = clip.empty() || clip == "off" ? std::string() : clip_color(clip);
+		return c.empty() ? "22b8ff" : c;
+	}
+	return {};
+}
+
 // Called every 0.2 s from focus_thread (a loop that is known to run): no thread of its own.
 // light.txt for ShellUI: "off", or "<solid|breathe|rainbow|wave> <speed 0-2> [RRGGBB ...]".
 // ShellUI animates it itself (bayosh_shellui.cpp, light_thread).
@@ -2054,16 +2297,22 @@ void light_step() {
 		}
 		g_light_now = want.rfind("solid ", 0) == 0 ? want.substr(want.size() - 6) : want == "off" ? "off" : g_light_mode;
 	}
+	// v0.3.2: over UDP (the module keeps the last one), repeated every ~2 s so a module that starts
+	// later still gets it; the file stays as a fallback when it fits.
+	static int beat = 0;
 	if (want == last) {
+		if (++beat >= 10) {
+			beat = 0;
+			send_module("L " + want);
+		}
 		return;
 	}
-	if (write_text(kLightFile, want + "\n")) {
-		log("light bar: %s", want.c_str());
-		last  = want;
-		fails = 0;
-	} else if (fails++ < 3) {
-		log("light bar: cannot write %s (errno %d)", kLightFile, errno);
-	}
+	beat = 0;
+	send_module("L " + want);
+	write_text(kLightFile, want + "\n");
+	log("light bar: %s", want.c_str());
+	last  = want;
+	fails = 0;
 }
 
 } // namespace bayosh
@@ -2074,11 +2323,13 @@ int main() {
 	mkdir("/data/bayosh", 0777);
 	mkdir("/data/bayosh/video", 0777);
 	mkdir("/system_tmp/bayosh", 0777);
+	// v0.3.2: /system_tmp is often full (errno 28). The light and one-shot commands go to the module
+	// over UDP 9053 instead (send_module); video.txt keeps the little room there is.
 	// Loading the payload = try again: a crash marker from an earlier run must not keep the video
 	// off until the next reboot.
 	unlink("/system_tmp/bayosh/video_trying");
 	g_log = open(kLogFile, O_WRONLY | O_CREAT | O_TRUNC, 0666);
-	log("bayo.sh v0.3.1 starting");
+	log("bayo.sh v0.4.0 starting");
 	if (take_over_running()) {
 		log("handover: took over from the bayo.sh that was running");
 	}
@@ -2094,6 +2345,7 @@ int main() {
 
 	std::vector<Video> videos = list_videos();
 	log("%zu video(s) found", videos.size());
+	drop_duplicate_thumbs(videos);
 	{
 		std::lock_guard<std::mutex> lock(g_ctl);
 		load_config();
@@ -2106,11 +2358,13 @@ int main() {
 			srand(static_cast<unsigned>(time(nullptr)) ^ static_cast<unsigned>(getpid()));
 			std::vector<std::string> others;
 			for (const Video& v : videos) {
-				if (v.path != g_current) {
+				if (v.path != g_current && mp4_check(v.path).ok) {
 					others.push_back(v.path);
 				}
 			}
-			g_current = others[static_cast<size_t>(rand()) % others.size()];
+			if (!others.empty()) {
+				g_current = others[static_cast<size_t>(rand()) % others.size()];
+			}
 			save_config();
 			log("shuffle: %s", g_current.c_str());
 		}
@@ -2135,6 +2389,7 @@ int main() {
 	start_thread(power_thread);
 	start_thread(stop_thread);
 	start_web_server();
+	notify("bayo.sh iniciando…"); // v0.3.2: instant feedback; the wallpaper follows in a few seconds
 
 	pid_t last_pid = inject_shellui();
 	if (last_pid < 0) {
@@ -2148,6 +2403,8 @@ int main() {
 	mirror_games();
 	start_thread(game_thread);
 	start_thread(focus_thread);
+	start_thread(rotate_thread);
+	start_widgets();
 
 	// Re-inject after ShellUI restarts. A restart soon after an injection means our module crashed
 	// it: stop for good instead of crash-looping the console.
@@ -2208,6 +2465,7 @@ int main() {
 	if (g_stop_requested) {
 		// v0.3: the controller light goes back to the system's colour before we leave (the module's
 		// light thread reads light.txt every ~0.4 s).
+		send_module("L off");
 		write_text(kLightFile, "off\n");
 		usleep(1500 * 1000);
 		close_app_window(); // "Cerrar": the window goes too when it is an app of its own

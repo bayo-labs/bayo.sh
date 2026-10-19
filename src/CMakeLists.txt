@@ -28,23 +28,36 @@ target_link_directories(bayosh_shellui PUBLIC "${ONIONHEN_PS5_STUB_DIR}")
 target_link_libraries(bayosh_shellui PUBLIC onion_payload onion_proc onion_platform onion_detour SceNotification kernel_sys)
 onion_strip_debug(bayosh_shellui)
 
-add_executable(bayosh ${D_CWD}/bayosh_daemon.cpp ${D_CWD}/bayosh_web.cpp ${D_CWD}/bayosh_tile.cpp ${D_CWD}/bayosh_net.cpp ${D_CWD}/bayosh_mp4.cpp)
+# v0.4: mbedTLS (Apache-2.0) for HTTPS; tools/build.sh fetches it into third_party/mbedtls.
+file(GLOB BAYOSH_MBEDTLS_SRC "${BAYOSH_MBEDTLS_DIR}/library/*.c")
+add_library(bayosh_mbedtls STATIC ${BAYOSH_MBEDTLS_SRC})
+target_include_directories(bayosh_mbedtls PUBLIC "${BAYOSH_MBEDTLS_DIR}/include" "${D_CWD}")
+target_include_directories(bayosh_mbedtls PRIVATE "${BAYOSH_MBEDTLS_DIR}/library")
+target_compile_definitions(bayosh_mbedtls PUBLIC MBEDTLS_USER_CONFIG_FILE="bayosh_mbedtls_user.h")
+target_compile_options(bayosh_mbedtls PRIVATE -Wno-everything)
+
+add_executable(bayosh ${D_CWD}/bayosh_daemon.cpp ${D_CWD}/bayosh_web.cpp ${D_CWD}/bayosh_tile.cpp ${D_CWD}/bayosh_net.cpp ${D_CWD}/bayosh_mp4.cpp ${D_CWD}/bayosh_tls.cpp ${D_CWD}/bayosh_widgets.cpp)
 set_target_properties(bayosh PROPERTIES OUTPUT_NAME "bayosh.elf")
 target_link_options(bayosh PRIVATE "-Wl,--gc-sections")
 add_dependencies(bayosh bayosh_shellui NineS onion_proc onion_platform onion_elfldr)
 set_source_files_properties(${D_CWD}/bayosh_daemon.cpp PROPERTIES OBJECT_DEPENDS "${ONIONHEN_OUT_BIN}/bayosh_shellui.elf")
 set_source_files_properties(${D_CWD}/bayosh_web.cpp PROPERTIES OBJECT_DEPENDS "${D_CWD}/bayosh_page.html;${D_CWD}/bayosh_remote.html;${D_CWD}/bayosh_music.mp4")
 set_source_files_properties(${D_CWD}/bayosh_tile.cpp PROPERTIES OBJECT_DEPENDS "${D_CWD}/icon0.png")
+set_source_files_properties(${D_CWD}/bayosh_tls.cpp PROPERTIES OBJECT_DEPENDS "${D_CWD}/cacert.pem")
 target_compile_definitions(bayosh PRIVATE
 	BAYOSH_SHELLUI_ELF="${ONIONHEN_OUT_BIN}/bayosh_shellui.elf"
 	BAYOSH_PAGE_HTML="${D_CWD}/bayosh_page.html"
 	BAYOSH_MUSIC_MP4="${D_CWD}/bayosh_music.mp4"
 	BAYOSH_REMOTE_HTML="${D_CWD}/bayosh_remote.html"
-	BAYOSH_ICON_PNG="${D_CWD}/icon0.png")
+	BAYOSH_ICON_PNG="${D_CWD}/icon0.png"
+	BAYOSH_CACERT_PEM="${D_CWD}/cacert.pem")
 target_include_directories(bayosh PRIVATE
 	"${PROJECT_ROOT}/libonion_proc/include"
 	"${PROJECT_ROOT}/libonion_platform/include"
 	"${PROJECT_ROOT}/include")
 target_link_directories(bayosh PUBLIC "${ONIONHEN_PS5_STUB_DIR}")
-target_link_libraries(bayosh PUBLIC NineS onion_proc onion_platform onion_elfldr SceNotification SceSystemService SceUserService kernel_sys)
+# v0.4: libSceNet for DNS; TLS is mbedTLS (the system's libSceHttp2 fails every https:// request
+# from a payload with an SSL error).
+target_link_libraries(bayosh PUBLIC NineS onion_proc onion_platform onion_elfldr SceNotification SceSystemService SceUserService kernel_sys
+	bayosh_mbedtls "${PS5_PAYLOAD_SDK}/target/lib/libSceNet.so")
 onion_strip_debug(bayosh)

@@ -4,6 +4,7 @@
 #include "bayosh.hpp"
 
 #include <atomic>
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -29,121 +30,12 @@ namespace {
 
 // libSceNet / libSceSsl / libSceHttp2 are loaded at run time: if a firmware lacks one, only the
 // download button fails, not the whole payload.
-using LoadStartFn  = int (*)(const char*, size_t, const void*, uint32_t, const void*, int*);
-using NetInitFn    = int (*)();
-using PoolFn       = int (*)(const char*, int, int);
-using SslInitFn    = int (*)(size_t);
-using HttpInitFn   = int (*)(int, int, size_t, int);
-using TmplFn       = int (*)(int, const char*, int, int);
-using ReqFn        = int (*)(int, const char*, const char*, uint64_t);
-using IdFn         = int (*)(int);
-using IdIntFn      = int (*)(int, int);
-using SendFn       = int (*)(int, const void*, size_t);
-using StatusFn     = int (*)(int, int*);
-using ReadFn       = int (*)(int, void*, size_t);
-using LenFn        = int (*)(int, int*, uint64_t*);
-using HeaderFn     = int (*)(int, const char*, const char*, uint32_t);
-
-struct Http {
-	bool       ready = false;
-	int        ctx   = -1;
-	TmplFn     tmpl  = nullptr;
-	IdFn       del_tmpl = nullptr;
-	ReqFn      req   = nullptr;
-	IdFn       del_req = nullptr;
-	SendFn     send  = nullptr;
-	StatusFn   status = nullptr;
-	ReadFn     read  = nullptr;
-	LenFn      length = nullptr;
-	IdIntFn    redirect = nullptr;
-	HeaderFn   header = nullptr;
-	IdFn       abort = nullptr;
-};
-
-Http              g_http;
 std::mutex        g_dl_mu;
 std::atomic<bool> g_dl_active {false};
 std::atomic<bool> g_dl_cancel {false};
-std::string       g_dl_name, g_dl_error, g_dl_url;
+std::string       g_dl_name, g_dl_error, g_dl_url, g_dl_ref;
 std::atomic<long long> g_dl_got {0}, g_dl_total {0};
 bool              g_dl_done = false;
-
-uint32_t module_handle(const char* name) {
-	uint32_t h = 0;
-	if (kernel_dynlib_handle(-1, name, &h) == 0 && h != 0) {
-		return h;
-	}
-	uint32_t kh = 0;
-	for (const char* k : {"libkernel_web.sprx", "libkernel.sprx", "libkernel_sys.sprx"}) {
-		if (kernel_dynlib_handle(-1, k, &kh) == 0 && kh != 0) {
-			break;
-		}
-	}
-	auto load = kh != 0 ? reinterpret_cast<LoadStartFn>(kernel_dynlib_resolve(-1, kh, "wzvqT4UqKX8")) : nullptr;
-	if (load == nullptr) {
-		return 0;
-	}
-	for (const char* root : {"/system/common/lib/", "/system/priv/lib/", "/system_ex/common_ex/lib/"}) {
-		const std::string path = std::string(root) + name;
-		int               res  = 0;
-		const int         id   = load(path.c_str(), 0, nullptr, 0, nullptr, &res);
-		if (id >= 0 && kernel_dynlib_handle(-1, name, &h) == 0 && h != 0) {
-			log("net: loaded %s", path.c_str());
-			return h;
-		}
-	}
-	log("net: %s could not be loaded", name);
-	return 0;
-}
-
-template <typename T>
-T sym(uint32_t h, const char* name) {
-	return h != 0 ? reinterpret_cast<T>(kernel_dynlib_dlsym(-1, h, name)) : nullptr;
-}
-
-bool http_ready() {
-	if (g_http.ready) {
-		return true;
-	}
-	const uint32_t net  = module_handle("libSceNet.sprx");
-	const uint32_t ssl  = module_handle("libSceSsl.sprx");
-	const uint32_t http = module_handle("libSceHttp2.sprx");
-	auto net_init  = sym<NetInitFn>(net, "sceNetInit");
-	auto pool      = sym<PoolFn>(net, "sceNetPoolCreate");
-	auto ssl_init  = sym<SslInitFn>(ssl, "sceSslInit");
-	auto http_init = sym<HttpInitFn>(http, "sceHttp2Init");
-	g_http.tmpl     = sym<TmplFn>(http, "sceHttp2CreateTemplate");
-	g_http.del_tmpl = sym<IdFn>(http, "sceHttp2DeleteTemplate");
-	g_http.req      = sym<ReqFn>(http, "sceHttp2CreateRequestWithURL");
-	g_http.del_req  = sym<IdFn>(http, "sceHttp2DeleteRequest");
-	g_http.send     = sym<SendFn>(http, "sceHttp2SendRequest");
-	g_http.status   = sym<StatusFn>(http, "sceHttp2GetStatusCode");
-	g_http.read     = sym<ReadFn>(http, "sceHttp2ReadData");
-	g_http.length   = sym<LenFn>(http, "sceHttp2GetResponseContentLength");
-	g_http.redirect = sym<IdIntFn>(http, "sceHttp2SetAutoRedirect");
-	g_http.header   = sym<HeaderFn>(http, "sceHttp2AddRequestHeader");
-	g_http.abort    = sym<IdFn>(http, "sceHttp2AbortRequest");
-	if (net_init == nullptr || pool == nullptr || ssl_init == nullptr || http_init == nullptr || g_http.tmpl == nullptr ||
-	    g_http.req == nullptr || g_http.send == nullptr || g_http.status == nullptr || g_http.read == nullptr) {
-		log("net: HTTP functions missing (net %#x ssl %#x http2 %#x)", net, ssl, http);
-		return false;
-	}
-	const int n = net_init();
-	const int mem = pool("bayosh_dl", 64 * 1024, 0);
-	const int sslc = ssl_init(256 * 1024);
-	if (mem < 0 || sslc < 0) {
-		log("net: init failed (net %d pool %d ssl %d)", n, mem, sslc);
-		return false;
-	}
-	g_http.ctx = http_init(mem, sslc, 256 * 1024, 2);
-	if (g_http.ctx < 0) {
-		log("net: sceHttp2Init failed (%#x)", static_cast<unsigned>(g_http.ctx));
-		return false;
-	}
-	g_http.ready = true;
-	log("net: HTTPS ready");
-	return true;
-}
 
 std::string url_file_name(const std::string& url) {
 	std::string path = url;
@@ -180,106 +72,106 @@ void finish(const std::string& error) {
 }
 
 void* download_thread(void*) {
-	std::string url, name;
+	std::string url, name, ref;
 	{
 		std::lock_guard<std::mutex> lock(g_dl_mu);
 		url  = g_dl_url;
 		name = g_dl_name;
+		ref  = g_dl_ref;
 	}
-	if (!http_ready()) {
-		finish("La consola no pudo iniciar HTTPS");
-		return nullptr;
-	}
-	const int t = g_http.tmpl(g_http.ctx, "Mozilla/5.0 (PlayStation 5) bayo.sh", 3, 1);
-	if (t < 0) {
-		log("download: template failed %#x", static_cast<unsigned>(t));
-		finish("No se pudo preparar la descarga");
-		return nullptr;
-	}
-	if (g_http.redirect != nullptr) {
-		g_http.redirect(t, 1);
-	}
-	const int r = g_http.req(t, "GET", url.c_str(), 0);
-	if (r < 0) {
-		log("download: bad request %#x for %s", static_cast<unsigned>(r), url.c_str());
-		if (g_http.del_tmpl) g_http.del_tmpl(t);
-		finish("Enlace no válido");
-		return nullptr;
-	}
-	if (g_http.header != nullptr) {
-		g_http.header(r, "Accept", "video/mp4,video/*;q=0.9,*/*;q=0.5", 0);
-	}
-	std::string error;
+	std::string       error;
 	const std::string path = "/data/bayosh/video/" + name;
 	const std::string part = path + ".part";
-	int status = 0;
-	const int sr = g_http.send(r, nullptr, 0);
-	if (sr != 0 || g_http.status(r, &status) != 0) {
-		log("download: send failed %#x (%s)", static_cast<unsigned>(sr), url.c_str());
-		error = "No se pudo conectar. Revisa el enlace y la red";
-	} else if (status != 200) {
-		log("download: HTTP %d (%s)", status, url.c_str());
-		error = "El sitio respondió " + std::to_string(status) + ". Usa el enlace directo del .mp4";
-	} else {
-		int      res = -1;
-		uint64_t len = 0;
-		if (g_http.length != nullptr && g_http.length(r, &res, &len) == 0 && res == 0) {
-			g_dl_total = static_cast<long long>(len);
-		}
-		log("download %s: %lld bytes from %s", name.c_str(), g_dl_total.load(), url.c_str());
-		const int f = open(part.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0666);
-		if (f < 0) {
-			error = "No se puede escribir en /data/bayosh/video";
-		} else {
-			static char buf[256 * 1024];
-			bool        head_ok = false;
-			int         got     = 0;
-			int         step    = 0;
-			while (!g_dl_cancel && (got = g_http.read(r, buf, sizeof(buf))) > 0) {
-				if (!head_ok && g_dl_got == 0) {
-					// An .mp4 starts with an "ftyp" box; a web page here means the link is not the video.
-					head_ok = got >= 8 && memcmp(buf + 4, "ftyp", 4) == 0;
-					if (!head_ok) {
-						error = "Ese enlace no es un video .mp4 (abre el video y copia su enlace directo)";
-						break;
-					}
-				}
-				if (write(f, buf, static_cast<size_t>(got)) != got) {
-					error = "Sin espacio para guardar el video";
-					break;
-				}
-				g_dl_got += got;
-				if (g_dl_got > 8LL * 1024 * 1024 * 1024) {
-					error = "El video pesa demasiado";
-					break;
-				}
-				const long long tot = g_dl_total;
-				if (tot > 0 && g_dl_got * 4 / tot > step) {
-					step = static_cast<int>(g_dl_got * 4 / tot);
-					log("download %s: %d%%", name.c_str(), step * 25);
-				}
-			}
-			close(f);
-			if (error.empty() && g_dl_cancel) {
-				error = "Descarga cancelada";
-			} else if (error.empty() && got < 0) {
-				log("download: read error %#x", static_cast<unsigned>(got));
-				error = "Se cortó la descarga";
-			} else if (error.empty() && g_dl_total > 0 && g_dl_got != g_dl_total) {
-				error = "Se cortó la descarga";
-			} else if (error.empty() && g_dl_got == 0) {
-				error = "El sitio no envió nada";
-			}
-			if (error.empty() && rename(part.c_str(), path.c_str()) != 0) {
-				error = "No se pudo guardar el video";
-			}
-			if (!error.empty()) {
-				unlink(part.c_str());
-			}
-		}
+	const int         f    = open(part.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0666);
+	if (f < 0) {
+		finish("No se puede escribir en /data/bayosh/video");
+		return nullptr;
 	}
-	if (g_http.del_req) g_http.del_req(r);
-	if (g_http.del_tmpl) g_http.del_tmpl(t);
+	bool head_ok = false;
+	int  step    = 0;
+	WebGetOptions opt;
+	opt.accept    = "video/mp4,video/*;q=0.9,*/*;q=0.5";
+	opt.referer   = ref;
+	opt.timeout_s = 30;
+	int status = 0;
+	constexpr size_t kWriteChunk = 1024 * 1024;
+	std::string      wbuf;
+	wbuf.reserve(kWriteChunk + 32 * 1024);
+	auto flush = [&]() -> bool {
+		size_t off = 0;
+		while (off < wbuf.size()) {
+			const ssize_t w = write(f, wbuf.data() + off, wbuf.size() - off);
+			if (w <= 0) {
+				error = "Sin espacio para guardar el video";
+				return false;
+			}
+			off += static_cast<size_t>(w);
+		}
+		wbuf.clear();
+		return true;
+	};
+	const bool ok = web_get(
+	    url, opt,
+	    [&](long long len, int st) {
+		    if (st != 200) {
+			    log("download: HTTP %d (%s)", st, url.c_str());
+			    error = "El sitio respondió " + std::to_string(st) + ". Usa el enlace directo del .mp4";
+			    return false;
+		    }
+		    g_dl_total = len > 0 ? len : 0;
+		    log("download %s: %lld bytes from %s", name.c_str(), g_dl_total.load(), url.c_str());
+		    return true;
+	    },
+	    [&](const char* p, size_t n) {
+		    if (g_dl_cancel) {
+			    error = "Descarga cancelada";
+			    return false;
+		    }
+		    if (!head_ok && g_dl_got == 0) {
+			    // An .mp4 starts with an "ftyp" box; a web page here means the link is not the video.
+			    head_ok = n >= 8 && memcmp(p + 4, "ftyp", 4) == 0;
+			    if (!head_ok) {
+				    error = "Ese enlace no es un video .mp4 (abre el video y copia su enlace directo)";
+				    return false;
+			    }
+		    }
+		    // Batch the small TLS records into ~1 MB disk writes.
+		    wbuf.append(p, n);
+		    if (wbuf.size() >= kWriteChunk && !flush()) {
+			    return false;
+		    }
+		    g_dl_got += static_cast<long long>(n);
+		    if (g_dl_got > 8LL * 1024 * 1024 * 1024) {
+			    error = "El video pesa demasiado";
+			    return false;
+		    }
+		    const long long tot = g_dl_total;
+		    if (tot > 0 && g_dl_got * 4 / tot > step) {
+			    step = static_cast<int>(g_dl_got * 4 / tot);
+			    log("download %s: %d%%", name.c_str(), step * 25);
+		    }
+		    return true;
+	    },
+	    error, status);
+	if (!wbuf.empty() && error.empty()) {
+		flush();
+	}
+	close(f);
+	if (error.empty() && !ok) {
+		error = "No se pudo conectar. Revisa el enlace y la red";
+	}
+	if (error.empty() && g_dl_got == 0) {
+		error = "El sitio no envió nada";
+	}
+	if (error.empty() && g_dl_total > 0 && g_dl_got != g_dl_total) {
+		error = "Se cortó la descarga";
+	}
+	if (error.empty() && rename(part.c_str(), path.c_str()) != 0) {
+		error = "No se pudo guardar el video";
+	}
+	if (!error.empty()) {
+		unlink(part.c_str());
+	}
 	log("download %s: %s", name.c_str(), error.empty() ? "done" : error.c_str());
 	finish(error);
 	return nullptr;
@@ -308,9 +200,72 @@ std::string jstr(const std::string& s) {
 	return o + "\"";
 }
 
+
+// Turns a catalog title into a safe file name: "Noche Neón" -> "noche-neon.mp4".
+std::string name_from_hint(const std::string& hint) {
+	std::string n;
+	for (const char c : hint) {
+		const unsigned char u = static_cast<unsigned char>(c);
+		if (isalnum(u)) {
+			n += static_cast<char>(tolower(u));
+		} else if ((c == ' ' || c == '-' || c == '_' || c == '.') && !n.empty() && n.back() != '-') {
+			n += '-';
+		}
+		if (n.size() >= 80) {
+			break;
+		}
+	}
+	while (!n.empty() && n.back() == '-') {
+		n.pop_back();
+	}
+	if (n.size() > 4 && n.compare(n.size() - 4, 4, "-mp4") == 0) {
+		n.resize(n.size() - 4);
+	}
+	return n.empty() ? "" : n + ".mp4";
+}
+
 } // namespace
 
-bool start_download(const std::string& url, std::string& error) {
+bool http_get(const std::string& url, size_t max_bytes, std::string& body, std::string& error, const std::string& user_agent) {
+	body.clear();
+	if (url.rfind("https://", 0) != 0 && url.rfind("http://", 0) != 0) {
+		error = "El enlace debe empezar con https://";
+		return false;
+	}
+	log("get %s", url.c_str());
+	WebGetOptions opt;
+	opt.user_agent = user_agent;
+	int           status = 0;
+	const bool    ok     = web_get(
+        url, opt,
+        [&](long long, int st) {
+            if (st != 200) {
+                error = "El sitio respondió " + std::to_string(st);
+                return false;
+            }
+            return true;
+        },
+        [&](const char* p, size_t n) {
+            body.append(p, n);
+            if (body.size() > max_bytes) {
+                error = "Respuesta demasiado grande";
+                return false;
+            }
+            return true;
+        },
+        error, status);
+	if (error.empty() && !ok) {
+		error = "No se pudo conectar. Revisa la red";
+	}
+	log("get %s: HTTP %d, %zu bytes%s%s", url.c_str(), status, body.size(), error.empty() ? "" : ", ", error.c_str());
+	if (!error.empty()) {
+		body.clear();
+		return false;
+	}
+	return true;
+}
+
+bool start_download(const std::string& url, std::string& error, const std::string& name_hint, const std::string& referer) {
 	if (url.rfind("https://", 0) != 0 && url.rfind("http://", 0) != 0) {
 		error = "El enlace debe empezar con https://";
 		return false;
@@ -325,7 +280,11 @@ bool start_download(const std::string& url, std::string& error) {
 		return false;
 	}
 	g_dl_url    = url;
-	g_dl_name   = url_file_name(url);
+	g_dl_ref    = referer;
+	g_dl_name   = name_hint.empty() ? url_file_name(url) : name_from_hint(name_hint);
+	if (g_dl_name.empty()) {
+		g_dl_name = url_file_name(url);
+	}
 	g_dl_error.clear();
 	g_dl_done   = false;
 	g_dl_got    = 0;
