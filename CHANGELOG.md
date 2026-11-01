@@ -1,6 +1,6 @@
 # Cambios
 
-## v0.5.0 — 2026-10-31
+## v0.5.0 — 2026-11-01
 - **Efecto del clima** sobre tu propio fondo: lluvia, llovizna, tormenta (con relámpagos), nieve o
   niebla según el clima de tu ciudad (Open-Meteo). El video que elegiste no cambia: el efecto va
   encima, debajo de la tarjeta de widgets, y se detiene cuando no hay video.

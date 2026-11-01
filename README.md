@@ -52,7 +52,7 @@
 Necesitas un PS5 con jailbreak y un cargador de payloads.
 
 1. Copia tus videos `.mp4` a `/data/bayosh/video/` (por FTP), o a una carpeta `bayosh` en una USB.
-2. Carga `bayosh.elf`.
+2. Descarga `bayosh.elf` de [Releases](https://github.com/bayo-labs/bayo.sh/releases/latest) y cárgalo.
 3. Abre **bayo.sh** en Multimedia, elige tu video en **Fondos** y presiona **Usar**.
 
 También puedes subir los videos desde el celular: abre `http://IP-del-PS5:9050` en el navegador (misma red Wi-Fi).
