@@ -2143,6 +2143,7 @@ void* game_thread(void*) {
 			continue;
 		}
 		last = now;
+		widgets_game(now ? std::string(id) : std::string()); // time played today / last game
 		std::lock_guard<std::mutex> lock(g_ctl);
 		g_game_running = now;
 		g_game_title   = now ? id : "";

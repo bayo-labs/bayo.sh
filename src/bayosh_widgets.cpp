@@ -44,6 +44,14 @@ bool        g_day   = true;
 bool        g_auto_place = false; // place found from the network (no city typed)
 std::string g_style = "wave";  // outline: wave | neon | rainbow | follow | fixed | breathe | off
 std::string g_color = "22b8ff"; // for fixed / breathe
+bool        g_clock   = true;  // v0.5 rows: time / date
+bool        g_play    = true;  //           time played today / last game
+int         g_utc_off = 0;     // seconds, from Open-Meteo (timezone=auto)
+bool        g_utc_known = false;
+int         g_play_day = 0;    // yyyymmdd that g_play_sec counts
+long        g_play_sec = 0;    // finished sessions today
+time_t      g_play_start = 0;  // a game is running since (0 = none)
+std::string g_last_tid, g_last_name;
 int         g_fx = 1;          // v0.5 weather effect over the wallpaper: 0 off, 1 soft, 2 strong
 std::string g_fx_test;         // preview kind ("rain", "snow"...) until g_fx_test_until
 time_t      g_fx_test_until = 0;
@@ -70,7 +78,10 @@ std::string value_of(const std::string& text, const char* key) {
 	return t.substr(s, t.find('\n', s) - s);
 }
 
+bool g_loaded = false;
+
 void load() {
+	g_loaded = true;
 	const std::string t = read_file(kWidgetsFile);
 	if (t.empty()) return;
 	g_on      = value_of(t, "on") != "0";
@@ -79,6 +90,12 @@ void load() {
 	g_disk    = value_of(t, "disk") != "0";
 	g_pad     = value_of(t, "pad") != "0";
 	g_city    = value_of(t, "city");
+	g_clock   = value_of(t, "clock") != "0";
+	g_play    = value_of(t, "play") != "0";
+	g_play_day = atoi(value_of(t, "playday").c_str());
+	g_play_sec = atol(value_of(t, "playsec").c_str());
+	g_last_tid  = value_of(t, "lasttid");
+	g_last_name = value_of(t, "lastname");
 	const std::string fx = value_of(t, "fx");
 	if (!fx.empty()) g_fx = atoi(fx.c_str()) < 0 ? 0 : atoi(fx.c_str()) > 2 ? 2 : atoi(fx.c_str());
 	g_place   = value_of(t, "place");
@@ -99,7 +116,9 @@ void save_locked() {
 	char geo[80] = {};
 	if (g_geo) snprintf(geo, sizeof(geo), "lat=%.4f\nlon=%.4f\n", g_lat, g_lon);
 	const std::string t = std::string("on=") + (g_on ? "1" : "0") + "\nweather=" + (g_weather ? "1" : "0") +
-	                      "\ntemp=" + (g_temp ? "1" : "0") + "\ndisk=" + (g_disk ? "1" : "0") + "\npad=" + (g_pad ? "1" : "0") + "\nfx=" + std::to_string(g_fx) + "\ncity=" + g_city +
+	                      "\ntemp=" + (g_temp ? "1" : "0") + "\ndisk=" + (g_disk ? "1" : "0") + "\npad=" + (g_pad ? "1" : "0") + "\nfx=" + std::to_string(g_fx) + "\nclock=" + (g_clock ? "1" : "0") + "\nplay=" + (g_play ? "1" : "0") +
+	                      "\nplayday=" + std::to_string(g_play_day) + "\nplaysec=" + std::to_string(g_play_sec) + "\nlasttid=" + g_last_tid +
+	                      "\nlastname=" + g_last_name + "\ncity=" + g_city +
 	                      "\nplace=" + g_place + "\nlang=" + g_lang + "\nstyle=" + g_style + "\ncolor=" + g_color + "\n" + geo;
 	const std::string tmp = std::string(kWidgetsFile) + ".tmp";
 	FILE* f = fopen(tmp.c_str(), "w");
@@ -293,6 +312,8 @@ void refresh_weather() {
 		g_weather_err = error;
 		return;
 	}
+	bool         oko;
+	const double off = json_number(body, "utc_offset_seconds", 0, oko);
 	const size_t cur = body.find("\"current\"");
 	bool         okt, okc;
 	const double temp = json_number(body, "temperature_2m", cur == std::string::npos ? 0 : cur, okt);
@@ -311,6 +332,10 @@ void refresh_weather() {
 	g_day          = !okd || day > 0.5;
 	g_weather_err.clear();
 	g_weather_at = time(nullptr);
+	if (oko) {
+		g_utc_off   = static_cast<int>(off);
+		g_utc_known = true;
+	}
 }
 
 int cpu_temperature() {
@@ -385,6 +410,62 @@ const char* weather_color(int code, bool day) {
 	return "b06bff";
 }
 
+// v0.5: local time. The payload's own time zone may be UTC, so prefer the offset Open-Meteo gives
+// for the place (timezone=auto); fall back to localtime. Caller holds g_wmu.
+tm local_now(time_t t) {
+	tm out {};
+	if (g_utc_known) {
+		const time_t shifted = t + g_utc_off;
+		gmtime_r(&shifted, &out);
+	} else {
+		localtime_r(&t, &out);
+	}
+	return out;
+}
+
+int day_key(time_t t) {
+	const tm l = local_now(t);
+	return (l.tm_year + 1900) * 10000 + (l.tm_mon + 1) * 100 + l.tm_mday;
+}
+
+// Seconds played today, the running game included (from local midnight on). Caller holds g_wmu.
+long played_today(time_t now) {
+	const int today = day_key(now);
+	long      sec   = g_play_day == today ? g_play_sec : 0;
+	if (g_play_start != 0) {
+		const tm l        = local_now(now);
+		const time_t mid  = now - (l.tm_hour * 3600 + l.tm_min * 60 + l.tm_sec);
+		sec += static_cast<long>(now - (g_play_start > mid ? g_play_start : mid));
+	}
+	return sec;
+}
+
+std::string clock_text(time_t now) {
+	static const char* const kDayEs[] = {"dom", "lun", "mar", "mié", "jue", "vie", "sáb"};
+	static const char* const kDayEn[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+	static const char* const kMonEs[] = {"ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"};
+	static const char* const kMonEn[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+	const tm l = local_now(now);
+	char     b[96];
+	if (en()) {
+		snprintf(b, sizeof(b), "%d:%02d %s\x1f%s %s %d", l.tm_hour % 12 == 0 ? 12 : l.tm_hour % 12, l.tm_min, l.tm_hour < 12 ? "AM" : "PM",
+		         kDayEn[l.tm_wday], kMonEn[l.tm_mon], l.tm_mday);
+	} else {
+		snprintf(b, sizeof(b), "%02d:%02d\x1f%s %d %s", l.tm_hour, l.tm_min, kDayEs[l.tm_wday], l.tm_mday, kMonEs[l.tm_mon]);
+	}
+	return b;
+}
+
+std::string duration_text(long sec) {
+	const long m = sec / 60;
+	char       b[48];
+	if (m < 1) snprintf(b, sizeof(b), "%s", en() ? "nothing yet" : "nada aún");
+	else if (m < 60) snprintf(b, sizeof(b), "%ld min", m);
+	else snprintf(b, sizeof(b), "%ld h %02ld min", m / 60, m % 60);
+	return b;
+}
+
+
 // v0.5: the weather effect drawn over the user's own wallpaper (the wallpaper never changes).
 // WMO codes: 45-48 fog, 51-57 drizzle, 61-67 / 80-82 rain, 71-77 / 85-86 snow, 95-99 storm.
 const char* fx_kind(int code) {
@@ -414,6 +495,8 @@ std::string message(const std::string& outline) {
 	auto row = [&](const char* color, const char* title, const std::string& value) {
 		m += std::string("\t") + color + "|" + title + "\t" + value;
 	};
+	const time_t now = time(nullptr);
+	if (g_clock) row("22b8ff", en() ? "Time" : "Hora", clock_text(now));
 	if (g_weather) {
 		std::string v = g_weather_text;
 		if (v.empty()) {
@@ -445,13 +528,20 @@ std::string message(const std::string& outline) {
 		row(charging ? "7cff00" : n <= 20 ? "ff4d4d" : n <= 40 ? "ffb020" : "34e89e", en() ? "Controller" : "Control",
 		    pct + "%" + (charging ? (en() ? " · charging" : " · cargando") : n <= 20 ? (en() ? " · low" : " · baja") : ""));
 	}
+	if (g_play) {
+		std::string v = (en() ? "Today " : "Hoy ") + duration_text(played_today(now));
+		if (!g_last_name.empty() || !g_last_tid.empty()) {
+			v += "\x1f" + std::string(en() ? "Last: " : "Último: ") + (g_last_name.empty() ? g_last_tid : g_last_name);
+		}
+		row(g_play_start != 0 ? "7cff00" : "ff9a3c", en() ? "Played" : "Jugado", v);
+	}
 	return m;
 }
 
 void* widgets_thread(void*) {
 	{
 		std::lock_guard<std::mutex> lock(g_wmu);
-		load();
+		if (!g_loaded) load();
 	}
 	time_t last_weather = 0;
 	int    seen_kick    = -1;
@@ -470,15 +560,35 @@ void* widgets_thread(void*) {
 			last_weather = time(nullptr);
 		}
 		seen_kick = kick;
-		std::string style;
+		std::string style, tid_to_name;
 		{
 			std::lock_guard<std::mutex> lock(g_wmu);
 			style = g_style;
+			if (g_play && g_last_name.empty() && !g_last_tid.empty()) tid_to_name = g_last_tid;
+		}
+		if (!tid_to_name.empty()) { // the game's title from its param (once per game)
+			std::string name;
+			for (const Game& gm : list_games()) {
+				if (gm.tid == tid_to_name) name = gm.name;
+			}
+			std::lock_guard<std::mutex> lock(g_wmu);
+			if (g_last_tid == tid_to_name) {
+				g_last_name = name.empty() ? tid_to_name : name.substr(0, 40);
+				save_locked();
+			}
 		}
 		module_send(message(widget_colors(style)));
 		module_send(fx_message());
-		for (int i = 0; i < 30 && g_kick.load() == seen_kick; ++i) {
-			sleep(1); // every 30 s, or right away after a change
+		int wait = 30;
+		{
+			std::lock_guard<std::mutex> lock(g_wmu);
+			if (g_clock && g_on) { // the clock turns over on the minute
+				const int left = 60 - local_now(time(nullptr)).tm_sec;
+				if (left < wait) wait = left;
+			}
+		}
+		for (int i = 0; i < wait && g_kick.load() == seen_kick; ++i) {
+			sleep(1); // every 30 s, at the minute for the clock, or right away after a change
 		}
 	}
 	return nullptr;
@@ -497,6 +607,28 @@ void start_widgets() {
 	pthread_attr_destroy(&attr);
 }
 
+// v0.5: the payload's game watcher: a game started (title id) or closed ("").
+void widgets_game(const std::string& tid) {
+	std::lock_guard<std::mutex> lock(g_wmu);
+	if (!g_loaded) load(); // never save over widgets.txt before reading it
+	const time_t now = time(nullptr);
+	if (g_play_start != 0) { // close the running session into today's total
+		const long today_sec = played_today(now);
+		g_play_day           = day_key(now);
+		g_play_sec           = today_sec;
+		g_play_start         = 0;
+	}
+	if (!tid.empty()) {
+		g_play_start = now;
+		if (tid != g_last_tid) {
+			g_last_tid = tid;
+			g_last_name.clear(); // looked up by the widgets thread
+		}
+	}
+	save_locked();
+	++g_kick;
+}
+
 void widgets_battery(const std::string& value) {
 	std::lock_guard<std::mutex> lock(g_wmu);
 	const std::string v = value == "-" ? std::string() : value;
@@ -508,11 +640,14 @@ void widgets_battery(const std::string& value) {
 
 bool widgets_set(const std::string& key, const std::string& value) {
 	std::lock_guard<std::mutex> lock(g_wmu);
+	if (!g_loaded) load();
 	if (key == "on") g_on = value != "0";
 	else if (key == "weather") g_weather = value != "0";
 	else if (key == "temp") g_temp = value != "0";
 	else if (key == "disk") g_disk = value != "0";
 	else if (key == "pad") g_pad = value != "0";
+	else if (key == "clock") g_clock = value != "0";
+	else if (key == "play") g_play = value != "0";
 	else if (key == "fx") {
 		const int v = atoi(value.c_str());
 		if (v < 0 || v > 2 || value.size() != 1) return false;
@@ -565,7 +700,8 @@ std::string widgets_json() {
 		return o + "\"";
 	};
 	return std::string("{\"on\":") + (g_on ? "true" : "false") + ",\"weather\":" + (g_weather ? "true" : "false") +
-	       ",\"temp\":" + (g_temp ? "true" : "false") + ",\"disk\":" + (g_disk ? "true" : "false") + ",\"pad\":" + (g_pad ? "true" : "false") + ",\"fx\":" + std::to_string(g_fx) +
+	       ",\"temp\":" + (g_temp ? "true" : "false") + ",\"disk\":" + (g_disk ? "true" : "false") + ",\"pad\":" + (g_pad ? "true" : "false") + ",\"clock\":" + (g_clock ? "true" : "false") +
+	       ",\"play\":" + (g_play ? "true" : "false") + ",\"fx\":" + std::to_string(g_fx) +
 	       ",\"fxnow\":" + js(g_fx > 0 && !g_weather_text.empty() ? fx_kind(g_wcode) : "none") + ",\"city\":" + js(g_city) +
 	       ",\"place\":" + js(g_place) + ",\"now\":" + js(g_weather_text) + ",\"err\":" + js(g_weather_err) +
 	       ",\"battery\":" + js(g_battery) + ",\"auto\":" + (g_city.empty() ? "true" : "false") + ",\"style\":" + js(g_style) +

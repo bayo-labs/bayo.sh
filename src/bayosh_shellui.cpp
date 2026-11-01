@@ -66,7 +66,7 @@ constexpr const char* kCmdFile    = "/system_tmp/bayosh/cmd.txt"; // v0.3.2: "ex
 std::atomic<bool>     g_exit_app_req {false};
 char                  g_light_udp[160] = {}; // v0.3.2: last "L ..." from the payload (UDP 9053)
 // v0.4 widgets: last "W ..." from the payload; read on the UI thread when the sequence moves.
-char                  g_wg_text[700] = {};
+char                  g_wg_text[900] = {};
 std::atomic<int>      g_wg_seq {0};
 std::atomic<int>      g_light_udp_seq {0};
 // v0.5 weather effect: last "C <kind> <level>" from the payload.
@@ -1853,7 +1853,7 @@ extern int g_px_left, g_px_right;
 // ---- v0.4 widgets: a "cristal neón" card on the home screen ------------------------------------
 // Built like the looks (UI3 Panels under the dim panel, so it stays above the video and leaves with
 // it) plus PUI Labels for the text. The payload sends "W <on>\t<title>\t<value>..." (UDP 9053).
-constexpr int kWgRows = 4;
+constexpr int kWgRows = 6; // v0.5: time, weather, console, storage, controller, played
 constexpr int kWgEdges = 8; // 4 sides x (glow, core)
 Obj   g_wg_label_class = nullptr;
 Obj   g_wg_card        = nullptr;
@@ -1868,7 +1868,7 @@ int   g_wg_shown_seq   = -1;
 int   g_wg_rows_built  = 0;
 const float kWgW = 600.0f, kWgX = 1920.0f - 64.0f - 600.0f, kWgRowH = 50.0f, kWgPad = 22.0f;
 const float kWgValueX0 = 230.0f; // value column (titles fit "Consola" / "Control" in 180 px)
-const float kWgAccent[kWgRows][3] = {{0.13f, 0.72f, 1.0f}, {1.0f, 0.42f, 0.30f}, {0.66f, 0.33f, 0.97f}, {0.20f, 0.95f, 0.55f}};
+const float kWgAccent[kWgRows][3] = {{0.13f, 0.72f, 1.0f}, {1.0f, 0.42f, 0.30f}, {0.66f, 0.33f, 0.97f}, {0.20f, 0.95f, 0.55f}, {1.0f, 0.60f, 0.24f}, {0.49f, 1.0f, 0.0f}};
 
 Obj wg_panel(Obj parent, float x, float y, float w, float h, void* color, const char* what) {
 	Obj ctor  = mono_class_get_method_from_name(g_dim_class, ".ctor", 0);
@@ -4326,7 +4326,7 @@ void* cmd_udp_thread(void*) {
 		return nullptr;
 	}
 	wp_log("commands: listening on 9053");
-	char buf[720];
+	char buf[960];
 	char last_x[64] = {};
 	for (;;) {
 		const ssize_t n = recv(s, buf, sizeof(buf) - 1, 0);

@@ -125,6 +125,7 @@ void        start_widgets();
 bool        widgets_set(const std::string& key, const std::string& value);
 std::string widgets_json();
 void        widgets_battery(const std::string& value);
+void        widgets_game(const std::string& tid); // v0.5: a game started (title id) or closed ("")
 std::string widget_colors(const std::string& style); // daemon: outline colours (wave/follow)
 void        module_send(const std::string& msg); // UDP to the ShellUI module (bayosh_daemon.cpp)
 
