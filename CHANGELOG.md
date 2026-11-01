@@ -8,15 +8,15 @@
   - **Probar efecto**: míralo 45 s aunque no esté lloviendo.
 - **Luz con los botones**: el LED del DualSense destella con cada botón (△ verde, ○ rojo, ✕ azul,
   □ rosa) y regresa a su modo. Si el control no se puede leer, se apaga solo y queda en el registro.
-- **Resplandor y chispas**: un halo del color de tu fondo detrás del juego elegido, que respira y
-  se enciende al moverte, y chispas que saltan del juego en cada movimiento. La posición se ajusta
-  en Efectos → **Ajustar posición** (flechas y tamaño, con vista previa en vivo en el inicio).
-- **Tablero de widgets**: la tarjeta pasa a ser un tablero de hasta 6 mosaicos neón (3 por fila),
-  cada uno con título, número grande, una línea chica y barra de 10 segmentos con un brillo que la
-  recorre. Mosaicos: **Hora** (con la zona horaria de tu ciudad), **Clima** (con el nombre de tu
-  colonia), **Consola**, **Disco**, **Control** y **Jugado hoy** (con tu último juego). El borde de
-  cada mosaico usa los mismos modos que antes (Ola, Neón, Arcoíris…), con el color viajando de uno
-  a otro. Cada mosaico se apaga por separado.
+- **Contorno y chispas en el juego elegido**: un borde de luz pegado al cajón del juego (como un
+  marco neón) cuyo color se mueve alrededor del color de tu fondo, y chispas que salen de las cuatro
+  orillas del cajón cada vez que te mueves. La posición se ajusta en Efectos → **Ajustar posición**
+  (flechas y tamaño, con vista previa en vivo en el inicio).
+- **Tablero de widgets**: dos filas alineadas a la derecha. Arriba, un **reloj digital** de 7
+  segmentos con la fecha al lado, el **clima** (con tu colonia) y **Jugado hoy**. Abajo, tres
+  **medidores de anillo**: **Consola** (temperatura), **Disco** (lo que queda libre) y **Control**
+  (batería), con una luz que recorre el anillo. Cada mosaico se apaga por separado y los demás se
+  recorren. El borde de cada mosaico usa los modos de contorno (Ola, Neón, Arcoíris…).
 - Los colores animados del menú ya no crean un objeto nuevo en cada cambio (caché de colores): la
   memoria del menú no crece con el tiempo.
 - **Recortar**: Convertir y aplicar ahora deja elegir desde dónde y hasta dónde (vista previa en

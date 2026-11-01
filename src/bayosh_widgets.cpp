@@ -448,8 +448,9 @@ std::string clock_text(time_t now) {
 	const tm l = local_now(now);
 	char     b[96];
 	if (en()) {
-		snprintf(b, sizeof(b), "%d:%02d %s\x1f%s %s %d", l.tm_hour % 12 == 0 ? 12 : l.tm_hour % 12, l.tm_min, l.tm_hour < 12 ? "AM" : "PM",
-		         kDayEn[l.tm_wday], kMonEn[l.tm_mon], l.tm_mday);
+		// the board's 7-segment digits take "9:41"; "Sat 31" / "Oct · PM" go beside them (\x1e splits the lines)
+		snprintf(b, sizeof(b), "%d:%02d\x1f%s %d\x1e%s · %s", l.tm_hour % 12 == 0 ? 12 : l.tm_hour % 12, l.tm_min, kDayEn[l.tm_wday],
+		         l.tm_mday, kMonEn[l.tm_mon], l.tm_hour < 12 ? "AM" : "PM");
 	} else {
 		snprintf(b, sizeof(b), "%02d:%02d\x1f%s %d %s", l.tm_hour, l.tm_min, kDayEs[l.tm_wday], l.tm_mday, kMonEs[l.tm_mon]);
 	}
@@ -491,58 +492,62 @@ std::string message(const std::string& outline) {
 	std::string m = std::string("W ") + (g_on ? "1" : "0") + " " + g_style;
 	if (!outline.empty()) m += " " + outline;
 	else if (g_style == "fixed" || g_style == "breathe") m += " " + g_color;
-	// v0.5 board tile: "RRGGBB|title|bar%" then "big value\x1fsmall line" (bar -1 = none)
-	auto tile = [&](const char* color, const std::string& title, int bar, const std::string& big, const std::string& small) {
-		m += std::string("\t") + color + "|" + title + (bar >= 0 ? "|" + std::to_string(bar > 100 ? 100 : bar) : std::string()) + "\t" + big +
-		     (small.empty() ? std::string() : "\x1f" + small);
+	// v0.5 dashboard tile: "RRGGBB|title|pct|kind" then "main\x1fsmall" (pct empty = no gauge).
+	// kind: t clock, w weather, j played, c console, d storage, p controller (the module places them).
+	auto tile = [&](const char* color, const std::string& title, int pct, char kind, const std::string& main, const std::string& small) {
+		m += std::string("\t") + color + "|" + title + "|" + (pct >= 0 ? std::to_string(pct > 100 ? 100 : pct) : std::string()) + "|" + kind +
+		     "\t" + main + (small.empty() ? std::string() : "\x1f" + small);
 	};
 	const time_t now = time(nullptr);
 	if (g_clock) {
 		const std::string c = clock_text(now); // "21:31\x1fsáb 31 oct"
 		const size_t      s = c.find('\x1f');
-		tile("22b8ff", en() ? "Time" : "Hora", -1, c.substr(0, s), s == std::string::npos ? std::string() : c.substr(s + 1));
+		tile("22b8ff", en() ? "Time" : "Hora", -1, 't', c.substr(0, s), s == std::string::npos ? std::string() : c.substr(s + 1));
 	}
 	if (g_weather) {
 		const std::string place = short_place(g_place);
 		const std::string title = place.empty() ? std::string(en() ? "Weather" : "Clima") : place;
 		if (g_weather_text.empty()) {
-			tile("22b8ff", title, -1, "—",
+			tile("a855f7", title, -1, 'w', "—",
 			     g_weather_err == "notfound" ? (en() ? "Check your city" : "Revisa tu ciudad")
 			     : g_weather_err.empty()     ? (en() ? "Looking…" : "Buscando…")
 			                                 : (en() ? "No weather now" : "Sin clima ahora"));
 		} else {
-			const size_t dot = g_weather_text.find(" · "); // "21° · Algo nublado"
-			tile(weather_color(g_wcode, g_day), title, -1, g_weather_text.substr(0, dot),
-			     dot == std::string::npos ? std::string() : g_weather_text.substr(dot + strlen(" · ")));
+			// "21° · Algo nublado": shown whole when it fits the tile (~12 characters), else alternating
+			const size_t      dot  = g_weather_text.find(" · ");
+			const std::string temp = g_weather_text.substr(0, dot);
+			const std::string sky  = dot == std::string::npos ? std::string() : g_weather_text.substr(dot + strlen(" · "));
+			const std::string both = temp + " · " + sky;
+			const bool        fits = both.size() <= 15; // bytes; "°" and "·" take two each
+			tile(weather_color(g_wcode, g_day), title, -1, 'w', fits ? both : temp, fits ? std::string() : sky);
 		}
+	}
+	if (g_play) {
+		const std::string last = g_last_name.empty() ? g_last_tid : g_last_name;
+		tile(g_play_start != 0 ? "7cff00" : "ff9a3c", en() ? "Played today" : "Jugado hoy", -1, 'j', duration_text(played_today(now)),
+		     last.empty() ? std::string() : (g_play_start != 0 ? std::string(en() ? "Playing: " : "Jugando: ") : std::string(en() ? "Last: " : "Último: ")) + last);
 	}
 	if (g_temp) {
 		const int t = cpu_temperature();
 		if (t >= 0) {
-			tile(t >= 75 ? "ff4d4d" : t >= 62 ? "ff9a3c" : "2ee5b5", en() ? "Console" : "Consola", t <= 35 ? 0 : (t - 35) * 100 / 50,
-			     std::to_string(t) + "°C",
-			     t >= 75 ? (en() ? "Very hot" : "Muy caliente") : t >= 62 ? (en() ? "Warm" : "Caliente") : (en() ? "All good" : "Todo bien"));
+			tile(t >= 75 ? "ff4d4d" : t >= 62 ? "ff9a3c" : "2ee5b5", en() ? "Console" : "Consola", t <= 35 ? 0 : (t - 35) * 100 / 50, 'c',
+			     std::to_string(t) + "°", t >= 75 ? (en() ? "Hot!" : "¡Calor!") : t >= 62 ? (en() ? "Warm" : "Caliente") : (en() ? "All good" : "Todo bien"));
 		}
 	}
 	if (g_disk) {
 		const Disk d = disk_space();
 		if (d.free >= 0) {
-			tile(d.free < 50 ? "ff4d6d" : "a855f7", en() ? "Storage" : "Disco",
-			     d.total > 0 ? static_cast<int>(d.free * 100 / d.total + 0.5) : -1, gb_text(d.free),
-			     std::string(en() ? "free" : "libres") + (d.total > 0 ? std::string(en() ? " of " : " de ") + gb_text(d.total) : std::string()));
+			const int pct = d.total > 0 ? static_cast<int>(d.free * 100 / d.total + 0.5) : 0;
+			tile(d.free < 50 ? "ff4d6d" : "a855f7", en() ? "Storage" : "Disco", pct, 'd', std::to_string(pct) + "%",
+			     gb_text(d.free) + (en() ? " free" : ""));
 		}
 	}
 	if (g_pad && !g_battery.empty()) {
 		const bool        charging = g_battery[0] == 'c';
 		const std::string pct      = charging ? g_battery.substr(1) : g_battery;
 		const int         n        = atoi(pct.c_str());
-		tile(charging ? "7cff00" : n <= 20 ? "ff4d4d" : n <= 40 ? "ffb020" : "34e89e", en() ? "Controller" : "Control", n, pct + "%",
-		     charging ? (en() ? "Charging" : "Cargando") : n <= 20 ? (en() ? "Low battery" : "Batería baja") : "DualSense");
-	}
-	if (g_play) {
-		const std::string last = g_last_name.empty() ? g_last_tid : g_last_name;
-		tile(g_play_start != 0 ? "7cff00" : "ff9a3c", en() ? "Played today" : "Jugado hoy", -1, duration_text(played_today(now)),
-		     last.empty() ? std::string() : (g_play_start != 0 ? std::string(en() ? "Playing: " : "Jugando: ") : std::string(en() ? "Last: " : "Último: ")) + last);
+		tile(charging ? "7cff00" : n <= 20 ? "ff4d4d" : n <= 40 ? "ffb020" : "22b8ff", en() ? "Controller" : "Control", n, 'p', pct + "%",
+		     charging ? (en() ? "Charging" : "Cargando") : n <= 20 ? (en() ? "Low" : "Baja") : "DualSense");
 	}
 	return m;
 }
