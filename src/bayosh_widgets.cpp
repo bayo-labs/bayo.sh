@@ -44,6 +44,9 @@ bool        g_day   = true;
 bool        g_auto_place = false; // place found from the network (no city typed)
 std::string g_style = "wave";  // outline: wave | neon | rainbow | follow | fixed | breathe | off
 std::string g_color = "22b8ff"; // for fixed / breathe
+int         g_fx = 1;          // v0.5 weather effect over the wallpaper: 0 off, 1 soft, 2 strong
+std::string g_fx_test;         // preview kind ("rain", "snow"...) until g_fx_test_until
+time_t      g_fx_test_until = 0;
 std::string g_battery;         // from the module: "80" (percent) or "c80" while charging
 std::atomic<int> g_kick {0};   // settings changed: refresh now
 
@@ -76,6 +79,8 @@ void load() {
 	g_disk    = value_of(t, "disk") != "0";
 	g_pad     = value_of(t, "pad") != "0";
 	g_city    = value_of(t, "city");
+	const std::string fx = value_of(t, "fx");
+	if (!fx.empty()) g_fx = atoi(fx.c_str()) < 0 ? 0 : atoi(fx.c_str()) > 2 ? 2 : atoi(fx.c_str());
 	g_place   = value_of(t, "place");
 	const std::string st = value_of(t, "style"), co = value_of(t, "color");
 	if (!st.empty()) g_style = st;
@@ -94,7 +99,7 @@ void save_locked() {
 	char geo[80] = {};
 	if (g_geo) snprintf(geo, sizeof(geo), "lat=%.4f\nlon=%.4f\n", g_lat, g_lon);
 	const std::string t = std::string("on=") + (g_on ? "1" : "0") + "\nweather=" + (g_weather ? "1" : "0") +
-	                      "\ntemp=" + (g_temp ? "1" : "0") + "\ndisk=" + (g_disk ? "1" : "0") + "\npad=" + (g_pad ? "1" : "0") + "\ncity=" + g_city +
+	                      "\ntemp=" + (g_temp ? "1" : "0") + "\ndisk=" + (g_disk ? "1" : "0") + "\npad=" + (g_pad ? "1" : "0") + "\nfx=" + std::to_string(g_fx) + "\ncity=" + g_city +
 	                      "\nplace=" + g_place + "\nlang=" + g_lang + "\nstyle=" + g_style + "\ncolor=" + g_color + "\n" + geo;
 	const std::string tmp = std::string(kWidgetsFile) + ".tmp";
 	FILE* f = fopen(tmp.c_str(), "w");
@@ -380,6 +385,26 @@ const char* weather_color(int code, bool day) {
 	return "b06bff";
 }
 
+// v0.5: the weather effect drawn over the user's own wallpaper (the wallpaper never changes).
+// WMO codes: 45-48 fog, 51-57 drizzle, 61-67 / 80-82 rain, 71-77 / 85-86 snow, 95-99 storm.
+const char* fx_kind(int code) {
+	if (code >= 45 && code <= 48) return "fog";
+	if (code >= 51 && code <= 57) return "drizzle";
+	if ((code >= 61 && code <= 67) || (code >= 80 && code <= 82)) return "rain";
+	if ((code >= 71 && code <= 77) || code == 85 || code == 86) return "snow";
+	if (code >= 95 && code <= 99) return "storm";
+	return "none";
+}
+
+// "C <kind> <level>" -> the module's particle layer.
+std::string fx_message() {
+	std::lock_guard<std::mutex> lock(g_wmu);
+	const bool  testing = !g_fx_test.empty() && time(nullptr) < g_fx_test_until;
+	const char* kind    = testing ? g_fx_test.c_str() : g_fx > 0 && !g_weather_text.empty() ? fx_kind(g_wcode) : "none";
+	const int   level   = testing && g_fx == 0 ? 1 : g_fx;
+	return std::string("C ") + kind + " " + std::to_string(level);
+}
+
 // "W <on> <style> <c1> <c2>...\t<RRGGBB|title>\t<value>\t..." -> the module's card.
 std::string message(const std::string& outline) {
 	std::lock_guard<std::mutex> lock(g_wmu);
@@ -435,7 +460,7 @@ void* widgets_thread(void*) {
 		bool      want_weather, missing;
 		{
 			std::lock_guard<std::mutex> lock(g_wmu);
-			want_weather = g_on && g_weather;
+			want_weather = (g_on && g_weather) || g_fx > 0;
 			missing      = g_weather_text.empty();
 		}
 		// refetch every 20 min, or when it is missing (new city / turned on) - at most once a minute
@@ -451,6 +476,7 @@ void* widgets_thread(void*) {
 			style = g_style;
 		}
 		module_send(message(widget_colors(style)));
+		module_send(fx_message());
 		for (int i = 0; i < 30 && g_kick.load() == seen_kick; ++i) {
 			sleep(1); // every 30 s, or right away after a change
 		}
@@ -487,6 +513,20 @@ bool widgets_set(const std::string& key, const std::string& value) {
 	else if (key == "temp") g_temp = value != "0";
 	else if (key == "disk") g_disk = value != "0";
 	else if (key == "pad") g_pad = value != "0";
+	else if (key == "fx") {
+		const int v = atoi(value.c_str());
+		if (v < 0 || v > 2 || value.size() != 1) return false;
+		g_fx = v;
+	} else if (key == "fxtest") { // preview for 45 s, whatever the sky says
+		static const char* const kKinds[] = {"rain", "drizzle", "storm", "snow", "fog", "none"};
+		bool known = false;
+		for (const char* k : kKinds) known = known || value == k;
+		if (!known) return false;
+		g_fx_test       = value;
+		g_fx_test_until = value == "none" ? 0 : time(nullptr) + 45;
+		++g_kick;
+		return true; // not saved
+	}
 	else if (key == "lang") g_lang = value.size() <= 5 ? value : g_lang;
 	else if (key == "style") {
 		static const char* const kStyles[] = {"wave", "neon", "rainbow", "follow", "fixed", "breathe", "off"};
@@ -525,7 +565,8 @@ std::string widgets_json() {
 		return o + "\"";
 	};
 	return std::string("{\"on\":") + (g_on ? "true" : "false") + ",\"weather\":" + (g_weather ? "true" : "false") +
-	       ",\"temp\":" + (g_temp ? "true" : "false") + ",\"disk\":" + (g_disk ? "true" : "false") + ",\"pad\":" + (g_pad ? "true" : "false") + ",\"city\":" + js(g_city) +
+	       ",\"temp\":" + (g_temp ? "true" : "false") + ",\"disk\":" + (g_disk ? "true" : "false") + ",\"pad\":" + (g_pad ? "true" : "false") + ",\"fx\":" + std::to_string(g_fx) +
+	       ",\"fxnow\":" + js(g_fx > 0 && !g_weather_text.empty() ? fx_kind(g_wcode) : "none") + ",\"city\":" + js(g_city) +
 	       ",\"place\":" + js(g_place) + ",\"now\":" + js(g_weather_text) + ",\"err\":" + js(g_weather_err) +
 	       ",\"battery\":" + js(g_battery) + ",\"auto\":" + (g_city.empty() ? "true" : "false") + ",\"style\":" + js(g_style) +
 	       ",\"color\":" + js(g_color) + "}";

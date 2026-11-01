@@ -69,6 +69,9 @@ char                  g_light_udp[160] = {}; // v0.3.2: last "L ..." from the pa
 char                  g_wg_text[700] = {};
 std::atomic<int>      g_wg_seq {0};
 std::atomic<int>      g_light_udp_seq {0};
+// v0.5 weather effect: last "C <kind> <level>" from the payload.
+char                  g_fx_text[64] = {};
+std::atomic<int>      g_fx_seq {0};
 
 constexpr const char* kLogFile    = "/system_tmp/bayosh/shellui.log";
 constexpr const char* kGuardFile  = "/system_tmp/bayosh/video_trying";
@@ -1839,6 +1842,8 @@ void build_look(Look look) {
 	wp_log("look %d: %d panels", static_cast<int>(look), g_look_count[look]);
 }
 
+Obj fx_root(); // v0.5 weather layer (below)
+
 // ---- v0.4 widgets: a "cristal neón" card on the home screen ------------------------------------
 // Built like the looks (UI3 Panels under the dim panel, so it stays above the video and leaves with
 // it) plus PUI Labels for the text. The payload sends "W <on>\t<title>\t<value>..." (UDP 9053).
@@ -1930,6 +1935,7 @@ bool wg_build() {
 		return false;
 	}
 	log_properties(g_wg_label_class, "widgets Label");
+	fx_root(); // weather layer first: the card is appended after it and stays on top
 	g_wg_halo = wg_panel(g_dim_panel, kWgX - 6.0f, 794.0f, kWgW + 12.0f, 212.0f, tint(0.13f, 0.72f, 1.0f, 0.16f), "widget halo");
 	if (g_wg_halo != nullptr) wg_round(g_wg_halo, 32.0f);
 	g_wg_card = wg_panel(g_dim_panel, kWgX, 800.0f, kWgW, 200.0f, tint(0.03f, 0.04f, 0.09f, 0.66f), "widget card");
@@ -2361,6 +2367,237 @@ void widgets_tick() {
 	if (rows != g_wg_rows_built) {
 		g_wg_rows_built = rows;
 		wp_log("widgets: %d row(s), %s", rows, on ? "on" : "off");
+	}
+}
+
+// ---- v0.5 weather effect: rain, drizzle, storm, snow or fog over the user's own wallpaper -------
+// Plain UI3 Panels like the looks, in one transparent layer under the widget card. Only positions and
+// colours change per frame (no allocations after the build); ~30 updates/s, nothing while no video
+// plays. The payload decides the kind from Open-Meteo ("C rain 1"); the wallpaper is never changed.
+constexpr int kFxMax = 56;
+Obj   g_fx_root = nullptr;
+Obj   g_fx_flash = nullptr;            // storm lightning: one full-screen white panel
+Obj   g_fx_p[kFxMax] = {};
+float g_fx_x[kFxMax], g_fx_y[kFxMax], g_fx_v[kFxMax], g_fx_len[kFxMax], g_fx_a[kFxMax], g_fx_ph[kFxMax];
+int   g_fx_built = 0;                  // particles created so far
+int   g_fx_kind = 0;                   // 0 none, 1 drizzle, 2 rain, 3 storm, 4 snow, 5 fog
+int   g_fx_level = 1;
+int   g_fx_seen = -1;
+int   g_fx_used = 0;                   // particles in use for this kind
+long  g_fx_last = 0, g_fx_next_flash = 0, g_fx_flash_t = 0;
+bool  g_fx_failed = false;
+void* g_fx_flash_col[5] = {};          // alpha 0, .05, .12, .2, .28 (built once: tint() pins a new object)
+int   g_fx_flash_shown = -1;
+uint32_t g_fx_rng = 0x9e3779b9u;
+
+float fx_rand() {
+	g_fx_rng ^= g_fx_rng << 13;
+	g_fx_rng ^= g_fx_rng >> 17;
+	g_fx_rng ^= g_fx_rng << 5;
+	return (g_fx_rng & 0xffffff) / 16777216.0f;
+}
+
+Obj fx_root() {
+	if (g_fx_root != nullptr || g_fx_failed) return g_fx_root;
+	if (g_dim_panel == nullptr && !g_dim_tried) create_dim_panel();
+	if (g_dim_panel == nullptr) {
+		g_fx_failed = true;
+		return nullptr;
+	}
+	Obj ctor = mono_class_get_method_from_name(g_dim_class, ".ctor", 0);
+	Obj root = ctor != nullptr ? construct_pinned(g_dim_class, ctor, nullptr, "fx layer") : nullptr;
+	if (root == nullptr) {
+		g_fx_failed = true;
+		return nullptr;
+	}
+	float zero = 0.0f, w = 1920.0f, h = 1080.0f;
+	property_set(g_ui3_widget, root, "X", &zero);
+	property_set(g_ui3_widget, root, "Y", &zero);
+	property_set(g_ui3_widget, root, "Width", &w);
+	property_set(g_ui3_widget, root, "Height", &h);
+	void* clear = tint(0.0f, 0.0f, 0.0f, 0.0f);
+	if (clear != nullptr) property_set(g_dim_class, root, g_dim_prop, clear);
+	if (has_setter(g_ui3_widget, "ClipChildren")) {
+		bool on = true;
+		property_set(g_ui3_widget, root, "ClipChildren", &on);
+	}
+	void* child[1] = {root};
+	if (!invoke(find_method_up(g_ui3_widget, "AppendChild", 1), g_dim_panel, child, "AppendChild(fx)")) {
+		g_fx_failed = true;
+		return nullptr;
+	}
+	g_fx_root = root;
+	wp_log("fx: layer ready");
+	return root;
+}
+
+Obj fx_panel(float x, float y, float w, float h) {
+	Obj ctor = mono_class_get_method_from_name(g_dim_class, ".ctor", 0);
+	Obj p    = ctor != nullptr ? construct_pinned(g_dim_class, ctor, nullptr, "fx particle") : nullptr;
+	if (p == nullptr) return nullptr;
+	wg_rect(p, x, y, w, h);
+	if (has_setter(g_dim_class, "BackgroundVisibility")) {
+		bool on = true;
+		property_set(g_dim_class, p, "BackgroundVisibility", &on);
+	}
+	void* clear = tint(0.0f, 0.0f, 0.0f, 0.0f);
+	if (clear != nullptr) property_set(g_dim_class, p, g_dim_prop, clear);
+	void* child[1] = {p};
+	invoke(find_method_up(g_ui3_widget, "AppendChild", 1), g_fx_root, child, "AppendChild(fx particle)");
+	return p;
+}
+
+// (Re)shape every particle for the new kind: size, colour, speed, start position.
+void fx_setup(int kind, int level) {
+	const bool strong = level >= 2;
+	int        n      = 0;
+	switch (kind) {
+	case 1: n = strong ? 28 : 18; break; // drizzle
+	case 2: n = strong ? 48 : 34; break; // rain
+	case 3: n = kFxMax; break;           // storm
+	case 4: n = strong ? 48 : 32; break; // snow
+	case 5: n = 10; break;               // fog: wide soft bands
+	default: n = 0; break;
+	}
+	if (n > 0 && g_fx_root == nullptr && fx_root() == nullptr) n = 0;
+	if (kind == 3 && g_fx_flash == nullptr && g_fx_root != nullptr) {
+		g_fx_flash = fx_panel(0.0f, 0.0f, 1920.0f, 1080.0f);
+		static const float kA[5] = {0.0f, 0.05f, 0.12f, 0.20f, 0.28f};
+		for (int i = 0; i < 5; ++i) g_fx_flash_col[i] = tint(1.0f, 1.0f, 1.0f, kA[i]);
+	}
+	while (g_fx_built < n) {
+		Obj p = fx_panel(0.0f, -100.0f, 2.0f, 2.0f);
+		if (p == nullptr) break;
+		g_fx_p[g_fx_built++] = p;
+	}
+	if (n > g_fx_built) n = g_fx_built;
+	for (int i = 0; i < g_fx_built; ++i) {
+		const bool use = i < n;
+		wg_visible(g_fx_p[i], use);
+		if (!use) continue;
+		float w, h, r = 0.80f, g = 0.88f, b = 1.0f, a;
+		g_fx_x[i]  = fx_rand() * 1920.0f;
+		g_fx_y[i]  = fx_rand() * 1080.0f;
+		g_fx_ph[i] = fx_rand() * 6.2832f;
+		if (kind == 4) { // snow: round flakes, slow, swaying
+			w = h       = 4.0f + fx_rand() * (strong ? 7.0f : 5.0f);
+			g_fx_v[i]   = 40.0f + fx_rand() * 80.0f + w * 6.0f;
+			a           = 0.55f + fx_rand() * 0.35f;
+			r = g = b   = 1.0f;
+			wg_round(g_fx_p[i], w * 0.5f);
+		} else if (kind == 5) { // fog: tall translucent bands that drift sideways
+			w           = 900.0f + fx_rand() * 700.0f;
+			h           = 120.0f + fx_rand() * 160.0f;
+			g_fx_y[i]   = 380.0f + (i * 70.0f) + fx_rand() * 40.0f;
+			g_fx_x[i]   = fx_rand() * 1920.0f - w * 0.5f;
+			g_fx_v[i]   = (8.0f + fx_rand() * 18.0f) * (i % 2 ? -1.0f : 1.0f);
+			a           = (strong ? 0.10f : 0.06f) + fx_rand() * 0.04f;
+			r = g = b   = 0.92f;
+			wg_round(g_fx_p[i], h * 0.5f);
+		} else { // drizzle / rain / storm: thin streaks
+			const float fast = kind == 1 ? 0.55f : kind == 3 ? 1.35f : 1.0f;
+			w           = kind == 1 ? 1.5f : 2.0f;
+			h           = (kind == 1 ? 18.0f : 30.0f) + fx_rand() * (kind == 1 ? 14.0f : 34.0f);
+			g_fx_v[i]   = (1300.0f + fx_rand() * 700.0f) * fast;
+			a           = (kind == 1 ? 0.22f : 0.28f) + fx_rand() * (strong ? 0.22f : 0.14f);
+			wg_round(g_fx_p[i], 1.0f);
+		}
+		g_fx_len[i] = h;
+		g_fx_a[i]   = a;
+		wg_rect(g_fx_p[i], g_fx_x[i], g_fx_y[i], w, h);
+		void* col = tint(r, g, b, a);
+		if (col != nullptr) property_set(g_dim_class, g_fx_p[i], g_dim_prop, col);
+	}
+	if (g_fx_flash != nullptr) {
+		if (g_fx_flash_col[0] != nullptr) property_set(g_dim_class, g_fx_flash, g_dim_prop, g_fx_flash_col[0]);
+		g_fx_flash_shown = 0;
+		wg_visible(g_fx_flash, kind == 3);
+	}
+	g_fx_used       = n;
+	g_fx_next_flash = now_ms() + 5000 + static_cast<long>(fx_rand() * 9000.0f);
+	g_fx_flash_t    = 0;
+	if (g_fx_root != nullptr) wg_visible(g_fx_root, n > 0);
+}
+
+void fx_tick() {
+	const int seq = g_fx_seq.load();
+	if (seq != g_fx_seen) {
+		g_fx_seen = seq;
+		char kind[24] = {};
+		int  level    = 1;
+		sscanf(g_fx_text, "%23s %d", kind, &level);
+		static const char* const kNames[] = {"none", "drizzle", "rain", "storm", "snow", "fog"};
+		int k = 0;
+		for (int i = 0; i < 6; ++i) {
+			if (strcmp(kind, kNames[i]) == 0) k = i;
+		}
+		if (level <= 0) k = 0;
+		if (k != g_fx_kind || level != g_fx_level) {
+			if (k != 0 || g_fx_root != nullptr) fx_setup(k, level);
+			wp_log("fx: %s level %d (%d particles)", kNames[k], level, g_fx_used);
+			g_fx_kind  = k;
+			g_fx_level = level;
+		}
+		g_fx_last = 0;
+	}
+	if (g_fx_kind == 0 || g_fx_used == 0 || g_fx_root == nullptr) return;
+	const bool show = video_active();
+	static bool shown = true;
+	if (show != shown) {
+		shown = show;
+		wg_visible(g_fx_root, show);
+	}
+	if (!show) {
+		g_fx_last = 0;
+		return;
+	}
+	const long now = now_ms();
+	float      dt  = g_fx_last == 0 ? 0.0f : (now - g_fx_last) / 1000.0f;
+	g_fx_last      = now;
+	if (dt > 0.1f) dt = 0.1f; // after a hitch: don't jump
+	for (int i = 0; i < g_fx_used; ++i) {
+		Obj p = g_fx_p[i];
+		if (p == nullptr) continue;
+		if (g_fx_kind == 5) { // fog drifts sideways and wraps
+			g_fx_x[i] += g_fx_v[i] * dt;
+			if (g_fx_x[i] > 1920.0f) g_fx_x[i] = -1600.0f;
+			if (g_fx_x[i] < -1600.0f) g_fx_x[i] = 1920.0f;
+			property_set(g_ui3_widget, p, "X", &g_fx_x[i]);
+			continue;
+		}
+		g_fx_y[i] += g_fx_v[i] * dt;
+		if (g_fx_kind == 4) {
+			g_fx_ph[i] += dt * 1.3f;
+			float x = g_fx_x[i] + sinf(g_fx_ph[i]) * 22.0f;
+			if (g_fx_y[i] > 1090.0f) {
+				g_fx_y[i] = -12.0f;
+				g_fx_x[i] = fx_rand() * 1920.0f;
+				x         = g_fx_x[i];
+			}
+			property_set(g_ui3_widget, p, "X", &x);
+		} else if (g_fx_y[i] > 1090.0f) {
+			g_fx_y[i] = -g_fx_len[i] - fx_rand() * 200.0f;
+			g_fx_x[i] = fx_rand() * 1920.0f;
+			property_set(g_ui3_widget, p, "X", &g_fx_x[i]);
+		}
+		property_set(g_ui3_widget, p, "Y", &g_fx_y[i]);
+	}
+	if (g_fx_kind == 3 && g_fx_flash != nullptr) { // lightning: two quick flashes, then a pause
+		if (g_fx_flash_t == 0 && now >= g_fx_next_flash) g_fx_flash_t = now;
+		if (g_fx_flash_t != 0) {
+			const long  e = now - g_fx_flash_t;
+			const float a = e < 90 ? 0.28f : e < 160 ? 0.04f : e < 260 ? 0.20f : e < 520 ? 0.20f * (1.0f - (e - 260) / 260.0f) : 0.0f;
+			const float k = a * (g_fx_level >= 2 ? 1.0f : 0.7f);
+			const int   s = k < 0.025f ? 0 : k < 0.085f ? 1 : k < 0.16f ? 2 : k < 0.24f ? 3 : 4;
+			if (s != g_fx_flash_shown && g_fx_flash_col[s] != nullptr) {
+				g_fx_flash_shown = s;
+				property_set(g_dim_class, g_fx_flash, g_dim_prop, g_fx_flash_col[s]);
+			}
+			if (e >= 520) {
+				g_fx_flash_t    = 0;
+				g_fx_next_flash = now + 6000 + static_cast<long>(fx_rand() * 12000.0f);
+			}
+		}
 	}
 }
 
@@ -3812,6 +4049,9 @@ void Update_Hook(Obj self) {
 		if (g_tick % 15 == 0) {
 			widgets_tick();
 		}
+		if (g_tick % 2 == 0) {
+			fx_tick(); // weather effect, ~30 updates/s while it is on
+		}
 		if (true) { // every frame: the menu fade needs it (just a static field read)
 			focus_tick();
 			parallax_tick();
@@ -4016,6 +4256,11 @@ void* cmd_udp_thread(void*) {
 			if (strcmp(buf + 2, g_wg_text) != 0) {
 				snprintf(g_wg_text, sizeof(g_wg_text), "%s", buf + 2);
 				++g_wg_seq;
+			}
+		} else if (buf[0] == 'C' && buf[1] == ' ') {
+			if (strcmp(buf + 2, g_fx_text) != 0) {
+				snprintf(g_fx_text, sizeof(g_fx_text), "%s", buf + 2);
+				++g_fx_seq;
 			}
 		} else if (buf[0] == 'L' && buf[1] == ' ') {
 			if (strcmp(buf + 2, g_light_udp) != 0) {
