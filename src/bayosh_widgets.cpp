@@ -118,7 +118,7 @@ bool en() {
 // WMO weather codes (Open-Meteo).
 const char* sky(int code) {
 	struct Row { int max; const char* es; const char* en; };
-	static const Row rows[] = {{0, "Despejado", "Clear"}, {2, "Parcialmente nublado", "Partly cloudy"}, {3, "Nublado", "Cloudy"},
+	static const Row rows[] = {{0, "Despejado", "Clear"}, {2, "Algo nublado", "Partly cloudy"}, {3, "Nublado", "Cloudy"},
 	                           {48, "Niebla", "Fog"}, {57, "Llovizna", "Drizzle"}, {67, "Lluvia", "Rain"}, {77, "Nieve", "Snow"},
 	                           {82, "Chubascos", "Showers"}, {86, "Nieve", "Snow"}, {99, "Tormenta", "Storm"}};
 	for (const Row& r : rows) {
@@ -147,6 +147,15 @@ std::string json_string(const std::string& j, const std::string& key, size_t fro
 	const size_t q1 = j.find('"', j.find(':', p) + 1);
 	const size_t q2 = q1 == std::string::npos ? q1 : j.find('"', q1 + 1);
 	return q1 == std::string::npos || q2 == std::string::npos ? std::string() : j.substr(q1 + 1, q2 - q1 - 1);
+}
+
+// "Delegación Iztapalapa" -> "Iztapalapa": the card has room for the name, not the admin level.
+std::string short_place(std::string p) {
+	for (const char* pre : {"Delegación ", "Alcaldía ", "Municipio de ", "Municipio ", "Colonia ", "Borough of ", "City of "}) {
+		const size_t n = strlen(pre);
+		if (p.size() > n + 2 && p.compare(0, n, pre) == 0) return p.substr(n);
+	}
+	return p;
 }
 
 std::string url_encode(const std::string& s) {
@@ -315,14 +324,49 @@ int cpu_temperature() {
 	return fn != nullptr && fn(&t) == 0 ? t : -1;
 }
 
-long long total_gb() {
+// Disk space as Settings > Storage shows it. statfs("/user") counts the whole user partition, but
+// Sony keeps part of it for the system and takes it off both the size and the free space (test
+// v0.4.0, PS5 Slim: statfs 273 GB free, Settings 187.2 GB free of 848.0 GB). The sizes Settings shows
+// are fixed per model, so the reserve is the partition size minus the largest of them that fits.
+struct Disk {
+	double total = -1, free = -1; // GB (10^9), as Settings shows them
+	double raw_total = -1, raw_free = -1;
+};
+
+Disk disk_space() {
+	Disk          d;
 	struct statfs sf {};
-	return statfs("/user", &sf) == 0 ? static_cast<long long>(sf.f_blocks) * sf.f_bsize / (1000LL * 1000 * 1000) : -1;
+	if (statfs("/user", &sf) != 0) return d;
+	const double gb = 1000.0 * 1000 * 1000;
+	d.raw_total     = static_cast<double>(sf.f_blocks) * sf.f_bsize / gb;
+	d.raw_free      = static_cast<double>(sf.f_bavail) * sf.f_bsize / gb;
+	d.total         = d.raw_total;
+	d.free          = d.raw_free;
+	// PS5 (825 GB), PS5 Slim (1 TB), PS5 Pro (2 TB)
+	static const double kShown[] = {1890.0, 848.0, 667.2};
+	for (const double shown : kShown) {
+		const double reserve = d.raw_total - shown;
+		if (reserve >= 0 && reserve <= d.raw_total * 0.25) {
+			d.total = shown;
+			d.free  = d.raw_free - reserve > 0 ? d.raw_free - reserve : 0;
+			break;
+		}
+	}
+	static bool logged = false;
+	if (!logged) {
+		logged = true;
+		log("widgets: disk statfs %.1f/%.1f GB (bsize %lu) -> shown %.1f/%.1f GB", d.raw_free, d.raw_total,
+		    static_cast<unsigned long>(sf.f_bsize), d.free, d.total);
+	}
+	return d;
 }
 
-long long free_gb() {
-	struct statfs sf {};
-	return statfs("/user", &sf) == 0 ? static_cast<long long>(sf.f_bavail) * sf.f_bsize / (1000LL * 1000 * 1000) : -1;
+std::string gb_text(double v) {
+	char b[32];
+	if (v >= 1000) snprintf(b, sizeof(b), "%.2f TB", v / 1000);
+	else if (v >= 100) snprintf(b, sizeof(b), "%.0f GB", v);
+	else snprintf(b, sizeof(b), "%.1f GB", v);
+	return b;
 }
 
 // Row colour from the weather: sun, night, clouds, fog, rain, snow, storm.
@@ -352,21 +396,21 @@ std::string message(const std::string& outline) {
 			    : g_weather_err.empty()      ? "…"
 			                                 : (en() ? "No weather right now" : "Sin clima por ahora");
 		}
-		if (!g_weather_text.empty() && !g_place.empty()) v += "\x1f" + g_place; // the card alternates the two
+		if (!g_weather_text.empty() && !g_place.empty()) v += "\x1f" + short_place(g_place); // the card alternates the two
 		row(weather_color(g_weather_text.empty() ? -1 : g_wcode, g_day), en() ? "Weather" : "Clima", v);
 	}
 	if (g_temp) {
 		const int t = cpu_temperature();
 		if (t >= 0) {
-			row(t >= 75 ? "ff4d4d" : t >= 62 ? "ff9a3c" : "2ee5b5", en() ? "Temperature" : "Temperatura", std::to_string(t) + "°C\x1f" +
+			row(t >= 75 ? "ff4d4d" : t >= 62 ? "ff9a3c" : "2ee5b5", en() ? "Console" : "Consola", std::to_string(t) + "°C\x1f" +
 			        (t >= 75 ? (en() ? "Very hot" : "Muy caliente") : t >= 62 ? (en() ? "Warm" : "Caliente") : (en() ? "All good" : "Todo bien")));
 		}
 	}
 	if (g_disk) {
-		const long long f = free_gb();
-		if (f >= 0) {
-			row(f < 50 ? "ff4d6d" : "a855f7", en() ? "Storage" : "Disco", std::to_string(f) + " GB " + (en() ? "free" : "libres") +
-			    (total_gb() > 0 ? "\x1f" + std::string(en() ? "of " : "de ") + std::to_string(total_gb()) + " GB" : std::string()));
+		const Disk d = disk_space();
+		if (d.free >= 0) {
+			row(d.free < 50 ? "ff4d6d" : "a855f7", en() ? "Storage" : "Disco", gb_text(d.free) + " " + (en() ? "free" : "libres") +
+			    (d.total > 0 ? "\x1f" + std::string(en() ? "of " : "de ") + gb_text(d.total) : std::string()));
 		}
 	}
 	if (g_pad && !g_battery.empty()) {

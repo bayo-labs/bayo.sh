@@ -1855,7 +1855,8 @@ Obj   g_wg_dot[kWgRows]   = {};
 bool  g_wg_failed      = false;
 int   g_wg_shown_seq   = -1;
 int   g_wg_rows_built  = 0;
-const float kWgW = 520.0f, kWgX = 1920.0f - 64.0f - 520.0f, kWgRowH = 50.0f, kWgPad = 22.0f;
+const float kWgW = 600.0f, kWgX = 1920.0f - 64.0f - 600.0f, kWgRowH = 50.0f, kWgPad = 22.0f;
+const float kWgValueX0 = 230.0f; // value column (titles fit "Consola" / "Control" in 180 px)
 const float kWgAccent[kWgRows][3] = {{0.13f, 0.72f, 1.0f}, {1.0f, 0.42f, 0.30f}, {0.66f, 0.33f, 0.97f}, {0.20f, 0.95f, 0.55f}};
 
 Obj wg_panel(Obj parent, float x, float y, float w, float h, void* color, const char* what) {
@@ -1947,8 +1948,8 @@ bool wg_build() {
 		g_wg_dot[i]   = wg_panel(g_wg_card, 24.0f, y + 17.0f, 10.0f, 10.0f,
 		                         tint(kWgAccent[i][0], kWgAccent[i][1], kWgAccent[i][2], 1.0f), "widget dot");
 		if (g_wg_dot[i] != nullptr) wg_round(g_wg_dot[i], 5.0f);
-		g_wg_title[i] = wg_label(g_wg_card, 46.0f, y, 170.0f, 44.0f, kWgAccent[i][0], kWgAccent[i][1], kWgAccent[i][2]);
-		g_wg_value[i] = wg_label(g_wg_card, 220.0f, y, kWgW - 240.0f, 44.0f, 0.95f, 0.96f, 1.0f);
+		g_wg_title[i] = wg_label(g_wg_card, 46.0f, y, 180.0f, 44.0f, kWgAccent[i][0], kWgAccent[i][1], kWgAccent[i][2]);
+		g_wg_value[i] = wg_label(g_wg_card, kWgValueX0, y, kWgW - kWgValueX0 - 20.0f, 44.0f, 0.95f, 0.96f, 1.0f);
 	}
 	Obj font = g_wg_value[0] != nullptr ? property_get(g_wg_label_class, g_wg_value[0], "Font") : nullptr;
 	if (font != nullptr && mono_object_get_class != nullptr) {
@@ -2201,7 +2202,7 @@ WgRowAnim g_wg_ra[kWgRows];
 long      g_wg_card_t  = 0;
 float     g_wg_card_y  = 0;
 bool      g_wg_card_on = false;
-const float kWgValueX  = 220.0f;
+const float kWgValueX  = kWgValueX0;
 
 void wg_opacity(Obj w, float o) {
 	if (w != nullptr) property_set(g_ui3_widget, w, "Opacity", &o);
