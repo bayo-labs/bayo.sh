@@ -2380,7 +2380,7 @@ void widgets_tick() {
 // Plain UI3 Panels like the looks, in one transparent layer under the widget card. Only positions and
 // colours change per frame (no allocations after the build); ~30 updates/s, nothing while no video
 // plays. The payload decides the kind from Open-Meteo ("C rain 1"); the wallpaper is never changed.
-constexpr int kFxMax = 56;
+constexpr int kFxMax = 40;
 Obj   g_fx_root = nullptr;
 Obj   g_fx_flash = nullptr;            // storm lightning: one full-screen white panel
 Obj   g_fx_p[kFxMax] = {};
@@ -2458,10 +2458,11 @@ void fx_setup(int kind, int level) {
 	const bool strong = level >= 2;
 	int        n      = 0;
 	switch (kind) {
-	case 1: n = strong ? 28 : 18; break; // drizzle
-	case 2: n = strong ? 48 : 34; break; // rain
-	case 3: n = kFxMax; break;           // storm
-	case 4: n = strong ? 48 : 32; break; // snow
+	// Each particle is one property write per update on ShellUI's UI thread: keep them few.
+	case 1: n = strong ? 18 : 12; break; // drizzle
+	case 2: n = strong ? 36 : 24; break; // rain
+	case 3: n = 40; break;               // storm
+	case 4: n = strong ? 36 : 24; break; // snow
 	case 5: n = 10; break;               // fog: wide soft bands
 	default: n = 0; break;
 	}
@@ -4454,7 +4455,7 @@ void* light_thread(void*) {
 	long     flash_t = 0;
 	int      read_fails = 0;
 	bool     read_told = false;
-	alignas(16) uint8_t pad_data[512];
+	alignas(16) uint8_t pad_data[1024]; // ScePadData is far smaller; room to spare
 	for (;;) {
 		const bool react = g_react.load() && p_pad_read != nullptr && read_fails < 20;
 		usleep(react ? 25 * 1000 : 50 * 1000);
