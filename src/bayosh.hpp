@@ -51,7 +51,7 @@ struct State {
 	std::string        light_fix  = "22b8ff"; // colour for fixed / breathe
 	int                light_speed = 1;        // 0 slow, 1 normal, 2 fast
 	bool               light_react = true;     // v0.5: flash with each button
-	bool               tile_fx     = true;     // v0.5: glow behind the highlighted tile
+	bool               tile_fx     = true;     // v0.5: glow sweep when moving between tiles
 	std::string        game;               // title id of the running game ("" = none)
 	std::string        current;  // real path of the chosen clip ("" = none)
 	std::string        status;   // ShellUI status line: playing / stopped / failed / starting

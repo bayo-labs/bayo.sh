@@ -72,6 +72,10 @@ std::atomic<int>      g_light_udp_seq {0};
 // v0.5 weather effect: last "C <kind> <level>" from the payload.
 char                  g_fx_text[64] = {};
 std::atomic<int>      g_fx_seq {0};
+// v0.5 "K <react> <tilefx> <RRGGBB>" from the payload
+std::atomic<bool>     g_react {false};
+std::atomic<bool>     g_tilefx {false};
+std::atomic<uint32_t> g_wall_rgb {0x22b8ffu};
 
 constexpr const char* kLogFile    = "/system_tmp/bayosh/shellui.log";
 constexpr const char* kGuardFile  = "/system_tmp/bayosh/video_trying";
@@ -1843,6 +1847,8 @@ void build_look(Look look) {
 }
 
 Obj fx_root(); // v0.5 weather layer (below)
+int px_transition(); // v0.5: BGLayerPlugin.TransitionType this frame (parallax section)
+extern int g_px_left, g_px_right;
 
 // ---- v0.4 widgets: a "cristal neón" card on the home screen ------------------------------------
 // Built like the looks (UI3 Panels under the dim panel, so it stays above the video and leaves with
@@ -2516,7 +2522,6 @@ void fx_setup(int kind, int level) {
 	g_fx_used       = n;
 	g_fx_next_flash = now_ms() + 5000 + static_cast<long>(fx_rand() * 9000.0f);
 	g_fx_flash_t    = 0;
-	if (g_fx_root != nullptr) wg_visible(g_fx_root, n > 0);
 }
 
 void fx_tick() {
@@ -2540,14 +2545,14 @@ void fx_tick() {
 		}
 		g_fx_last = 0;
 	}
-	if (g_fx_kind == 0 || g_fx_used == 0 || g_fx_root == nullptr) return;
+	if (g_fx_root == nullptr) return;
 	const bool show = video_active();
 	static bool shown = true;
 	if (show != shown) {
 		shown = show;
 		wg_visible(g_fx_root, show);
 	}
-	if (!show) {
+	if (!show || g_fx_kind == 0 || g_fx_used == 0) {
 		g_fx_last = 0;
 		return;
 	}
@@ -2598,6 +2603,74 @@ void fx_tick() {
 				g_fx_next_flash = now + 6000 + static_cast<long>(fx_rand() * 12000.0f);
 			}
 		}
+	}
+}
+
+// ---- v0.5 tile effect: a glow in the wallpaper's colour sweeps across when you move between games --
+// ShellUI does not tell the background where each tile is drawn, but it does say when the highlight
+// slides left or right (BGLayerPlugin.TransitionType, the same signal as the parallax). A soft vertical
+// band of light crosses the screen that way, under the widget card. Colours are built once per
+// wallpaper colour (tint() pins a new object every call).
+constexpr int kSwBands = 9;
+Obj      g_sw[kSwBands] = {};
+uint32_t g_sw_rgb = 0xffffffffu;
+long     g_sw_t = 0;
+int      g_sw_dir = 0, g_sw_last_type = -1;
+bool     g_sw_failed = false;
+
+void sweep_tick() {
+	if (!g_tilefx.load() || g_sw_failed || !video_active()) {
+		if (g_sw_t != 0) {
+			for (Obj b : g_sw) wg_visible(b, false);
+			g_sw_t = 0;
+		}
+		return;
+	}
+	const int type = px_transition();
+	if (type != g_sw_last_type) {
+		g_sw_last_type = type;
+		if (type >= 0 && (type == g_px_left || type == g_px_right)) {
+			g_sw_dir = type == g_px_left ? 1 : -1;
+			g_sw_t   = now_ms();
+		}
+	}
+	if (g_sw_t == 0) return;
+	if (g_sw[0] == nullptr) {
+		if (fx_root() == nullptr) {
+			g_sw_failed = true;
+			return;
+		}
+		for (int i = 0; i < kSwBands; ++i) {
+			g_sw[i] = fx_panel(-400.0f, 0.0f, 38.0f, 1080.0f);
+			if (g_sw[i] == nullptr) {
+				g_sw_failed = true;
+				return;
+			}
+		}
+		wp_log("tile fx: sweep ready");
+	}
+	const uint32_t rgb = g_wall_rgb.load();
+	if (rgb != g_sw_rgb) {
+		g_sw_rgb = rgb;
+		for (int i = 0; i < kSwBands; ++i) {
+			const float d = (i - (kSwBands - 1) * 0.5f) / ((kSwBands - 1) * 0.5f); // -1..1
+			const float a = 0.20f * (1.0f - d * d);                                   // bell
+			void* c = tint(((rgb >> 16) & 255) / 255.0f, ((rgb >> 8) & 255) / 255.0f, (rgb & 255) / 255.0f, a);
+			if (c != nullptr) property_set(g_dim_class, g_sw[i], g_dim_prop, c);
+		}
+	}
+	const float e = (now_ms() - g_sw_t) / 520.0f;
+	if (e >= 1.0f) {
+		for (Obj b : g_sw) wg_visible(b, false);
+		g_sw_t = 0;
+		return;
+	}
+	const float k  = 1.0f - (1.0f - e) * (1.0f - e); // ease out
+	const float cx = g_sw_dir > 0 ? -250.0f + k * 2420.0f : 2170.0f - k * 2420.0f;
+	for (int i = 0; i < kSwBands; ++i) {
+		float x = cx + (i - kSwBands / 2) * 36.0f;
+		wg_visible(g_sw[i], true);
+		property_set(g_ui3_widget, g_sw[i], "X", &x);
 	}
 }
 
@@ -3486,6 +3559,18 @@ void setup_parallax() {
 	wp_log("parallax: TransitionType getter %p, SlideInLeft %d, SlideInRight %d", g_px_getter, g_px_left, g_px_right);
 }
 
+// One TransitionType read per frame, shared by the parallax and the tile sweep. -1 = unknown.
+int px_transition() {
+	static int cached_tick = -1, cached = -1;
+	if (cached_tick == g_tick) return cached;
+	cached_tick = g_tick;
+	if (!g_px_ready) setup_parallax();
+	if (g_px_getter == nullptr || g_px_left < 0) return cached = -1;
+	Obj exc = nullptr;
+	Obj val = mono_runtime_invoke(g_px_getter, g_plugin, nullptr, &exc);
+	return cached = exc == nullptr && val != nullptr ? *static_cast<int*>(mono_object_unbox(val)) : -1;
+}
+
 void place_view(Obj view, bool parallax, float shift) {
 	float x = parallax ? -kOverX + shift : 0.0f, y = parallax ? -kOverY : 0.0f;
 	float w = parallax ? 1920.0f + 2 * kOverX : 1920.0f, h = parallax ? 1080.0f + 2 * kOverY : 1080.0f;
@@ -3511,15 +3596,10 @@ void parallax_tick() {
 	if (!on) {
 		return;
 	}
-	if (!g_px_ready) {
-		setup_parallax();
-	}
-	if (g_px_getter == nullptr || g_px_left < 0) {
+	const int type = px_transition();
+	if (type < 0) {
 		return;
 	}
-	Obj exc = nullptr;
-	Obj val = mono_runtime_invoke(g_px_getter, g_plugin, nullptr, &exc);
-	const int type = exc == nullptr && val != nullptr ? *static_cast<int*>(mono_object_unbox(val)) : -1;
 	if (type != g_px_last) {
 		g_px_last = type;
 		if (type == g_px_left || type == g_px_right) {
@@ -4055,6 +4135,7 @@ void Update_Hook(Obj self) {
 		if (true) { // every frame: the menu fade needs it (just a static field read)
 			focus_tick();
 			parallax_tick();
+			sweep_tick();
 		}
 	}
 
@@ -4117,10 +4198,6 @@ int (*p_pad_init)()                                      = nullptr;
 int (*p_pad_open)(int user, int type, int index, const void* param) = nullptr;
 int (*p_login_users)(int* users)                         = nullptr;
 int (*p_pad_read)(int handle, void* data)                = nullptr; // v0.5: scePadReadState (buttons)
-// v0.5 "K <react> <tilefx> <RRGGBB>" from the payload
-std::atomic<bool>     g_react {false};
-std::atomic<bool>     g_tilefx {false};
-std::atomic<uint32_t> g_wall_rgb {0x22b8ffu};
 
 int pad_handle_now() {
 	static int dumps = 0;

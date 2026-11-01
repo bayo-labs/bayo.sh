@@ -127,7 +127,7 @@ std::string g_light_mode = "follow"; // follow | fixed | rainbow | breathe | wav
 std::string g_light_fix  = "22b8ff";
 int         g_light_speed = 1;
 bool        g_light_react = true; // v0.5: the light bar flashes with each button (PlayStation colours)
-bool        g_tile_fx     = true; // v0.5: glow in the wallpaper's colour behind the highlighted tile
+bool        g_tile_fx     = true; // v0.5: a glow in the wallpaper's colour sweeps across when moving between tiles
 bool        g_game_running = false;
 std::string g_game_title;
 std::string g_override;     // per-game clip playing instead of g_current ("" = main wallpaper)
