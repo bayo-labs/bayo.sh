@@ -246,7 +246,7 @@ bool find_place(const std::string& city, const std::string& lang, double& lat, d
 		url += vb;
 	}
 	error.clear();
-	if (http_get(url, 64 * 1024, body, error, "bayo.sh/0.4 (PS5 wallpaper app; github.com/bayo-labs/bayo.sh)")) {
+	if (http_get(url, 64 * 1024, body, error, "bayo.sh/0.5 (PS5 wallpaper app; github.com/bayo-labs/bayo.sh)")) {
 		bool ok1, ok2;
 		lat = json_number(body, "lat", 0, ok1);
 		lon = json_number(body, "lon", 0, ok2);

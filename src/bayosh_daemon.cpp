@@ -2362,7 +2362,7 @@ int main() {
 	// off until the next reboot.
 	unlink("/system_tmp/bayosh/video_trying");
 	g_log = open(kLogFile, O_WRONLY | O_CREAT | O_TRUNC, 0666);
-	log("bayo.sh v0.4.0 starting");
+	log("bayo.sh v0.5.0 starting");
 	if (take_over_running()) {
 		log("handover: took over from the bayo.sh that was running");
 	}

@@ -1,5 +1,32 @@
 # Cambios
 
+## v0.5.0 — 2026-10-31
+- **Efecto del clima** sobre tu propio fondo: lluvia, llovizna, tormenta (con relámpagos), nieve o
+  niebla según el clima de tu ciudad (Open-Meteo). El video que elegiste no cambia: el efecto va
+  encima, debajo de la tarjeta de widgets, y se detiene cuando no hay video.
+  - Ajustes → Widgets del inicio → **Efecto del clima**: No / Suave / Fuerte.
+  - **Probar efecto**: míralo 45 s aunque no esté lloviendo.
+- **Luz con los botones**: el LED del DualSense destella con cada botón (△ verde, ○ rojo, ✕ azul,
+  □ rosa) y regresa a su modo. Si el control no se puede leer, se apaga solo y queda en el registro.
+- **Destello entre juegos**: al moverte entre juegos, un brillo del color de tu fondo cruza la
+  pantalla hacia ese lado (usa la misma señal que el paralaje).
+- **Widgets nuevos**: **Hora** (con la zona horaria de tu ciudad, alterna con la fecha) y **Jugado**
+  (tiempo jugado hoy, alterna con tu último juego). La tarjeta pasa de 4 a 6 filas; cada una se
+  apaga por separado.
+- **Recortar**: Convertir y aplicar ahora deja elegir desde dónde y hasta dónde (vista previa en
+  bucle). Botón **Recortar** en cada video compatible: guarda `<nombre>_recorte.mp4` y lo pone de
+  fondo sin borrar el original.
+- **Cerrar** busca la ventana de bayo.sh en todas las listas de apps del menú y solo cierra esa
+  (BYSH00001); deja en el registro los métodos que encontró.
+- Arreglos:
+  - **Espacio libre** igual que Ajustes → Almacenamiento: se descuenta la reserva del sistema
+    (prueba en PS5 Slim: el widget decía 273 GB y Ajustes 187.2 GB).
+  - Textos de la tarjeta sin cortar: tarjeta más ancha, "Temperatura" → "Consola",
+    "Algo nublado" y el lugar sin "Delegación" / "Alcaldía".
+  - widgets.txt ya no se puede guardar antes de leerse (un juego abierto al arrancar podía borrar
+    la ciudad y los ajustes de widgets).
+- Traducciones de todo lo nuevo en los 10 idiomas.
+
 ## v0.4.0 — 2026-10-19
 - **Widgets en el inicio**: tarjeta "cristal neón" sobre tu fondo con 4 filas.
   - **Clima**: de tu ciudad o colonia, o detectado solo por tu red. Usa Open-Meteo; las colonias y
