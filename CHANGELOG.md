@@ -15,7 +15,7 @@
   encuentra, usa la posición medida en un PS5 o la que acomodes en Efectos → **Ajustar posición**.
 - **Tablero de widgets** (626 × 178 px, arriba a la derecha bajo la hora del PS5): dos filas alineadas a la derecha. Arriba, un **reloj digital** de 7
   segmentos con la fecha al lado, el **clima** (con tu colonia) y **Jugado hoy**. Abajo, tres
-  **medidores de anillo**: **Consola** (temperatura), **Disco** (lo que queda libre) y **Control**
+  **medidores de anillo**: **Consola** (temperatura), **Disco** (qué tan lleno está; abajo alterna los GB libres) y **Control**
   (batería), con una luz que recorre el anillo. Cada mosaico se apaga por separado y los demás se
   recorren. El borde de cada mosaico usa los modos de contorno (Ola, Neón, Arcoíris…).
   Los mosaicos flotan suave uno tras otro y una franja de luz cruza el cristal de cada uno.

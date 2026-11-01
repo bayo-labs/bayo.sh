@@ -1924,7 +1924,7 @@ int   g_wg_rows_built  = 0; // tiles on screen
 const float kWgValueX = 14.0f;
 const float kRingCX   = 50.0f; // ring centre inside a gauge tile
 const float kWgAccent[kWgRows][3] = {{0.13f, 0.72f, 1.0f}, {0.66f, 0.33f, 0.97f}, {1.0f, 0.60f, 0.24f}, {0.18f, 0.90f, 0.71f}, {0.66f, 0.33f, 0.97f}, {0.13f, 0.72f, 1.0f}};
-const float kWgSecond[kWgRows][3] = {{1, 1, 1}, {1, 1, 1}, {1, 1, 1}, {1.0f, 0.60f, 0.24f}, {1.0f, 0.24f, 0.60f}, {1.0f, 0.24f, 0.60f}};
+const float kWgSecond[kWgRows][3] = {{1, 1, 1}, {1, 1, 1}, {1, 1, 1}, {1.0f, 0.60f, 0.24f}, {1.0f, 0.30f, 0.43f}, {1.0f, 0.24f, 0.60f}};
 
 Obj wg_panel(Obj parent, float x, float y, float w, float h, void* color, const char* what) {
 	Obj ctor  = mono_class_get_method_from_name(g_dim_class, ".ctor", 0);
@@ -2398,6 +2398,17 @@ void wg_anim() {
 		wg_text(g_wg_value[i], g_wg_alt[i] ? g_wg_small[i] : g_wg_main[i]);
 		g_wg_val_t[i] = now;
 	}
+	for (int i = 0; i < kWgRows; ++i) { // gauge small line with two halves ("184 GB" / "libres")
+		if (!g_wg_present[i] || kSlot[i].type != kGauge || g_wg_alt_next[i] == 0 || now < g_wg_alt_next[i]) continue;
+		const char* rs = strchr(g_wg_small[i], '\x1e');
+		if (rs == nullptr) continue;
+		g_wg_alt[i]      = g_wg_alt[i] == 0 ? 1 : 0;
+		g_wg_alt_next[i] = now + (g_wg_alt[i] == 0 ? 4000 : 2500);
+		char part[100];
+		if (g_wg_alt[i] == 0) snprintf(part, sizeof(part), "%.*s", static_cast<int>(rs - g_wg_small[i]), g_wg_small[i]);
+		else snprintf(part, sizeof(part), "%s", rs + 1);
+		wg_text(g_wg_sub[i], part);
+	}
 	for (int i = 0; i < kWgRows; ++i) {
 		if (g_wg_val_t[i] == 0) continue;
 		const float e = ease((now - g_wg_val_t[i]) / 480.0f);
@@ -2537,7 +2548,14 @@ void widgets_tick() {
 		} else if (kSlot[i].type == kGauge) {
 			wg_text(g_wg_title[i], part[1]);
 			if (main_changed) wg_ring_value(i, main);
-			if (small_changed) wg_text(g_wg_sub[i], small);
+			if (small_changed) { // "184 GB\x1elibres": the two halves take turns (wg_anim)
+				char first[100];
+				const char* rs = strchr(small, '\x1e');
+				snprintf(first, sizeof(first), "%.*s", static_cast<int>(rs != nullptr ? rs - small : strlen(small)), small);
+				wg_text(g_wg_sub[i], first);
+				g_wg_alt[i]      = 0;
+				g_wg_alt_next[i] = rs != nullptr ? now_ms() + 4000 : 0;
+			}
 			wg_ring(i, part[2] != nullptr && part[2][0] != 0 ? atoi(part[2]) : -1);
 		} else {
 			wg_text(g_wg_title[i], part[1]);

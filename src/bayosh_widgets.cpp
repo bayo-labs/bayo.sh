@@ -537,9 +537,11 @@ std::string message(const std::string& outline) {
 	if (g_disk) {
 		const Disk d = disk_space();
 		if (d.free >= 0) {
-			const int pct = d.total > 0 ? static_cast<int>(d.free * 100 / d.total + 0.5) : 0;
-			tile(d.free < 50 ? "ff4d6d" : "a855f7", en() ? "Storage" : "Disco", pct, 'd', std::to_string(pct) + "%",
-			     gb_text(d.free) + (en() ? " free" : ""));
+			// v0.5.2: the ring shows how full the drive is (user: 184 GB left should look nearly full);
+			// the small line alternates "184 GB" / "libres" (\x1e) so what is left is still there
+			const int used = d.total > 0 ? static_cast<int>((d.total - d.free) * 100 / d.total + 0.5) : 0;
+			tile(d.free < 50 || used >= 90 ? "ff4d6d" : used >= 85 ? "ff9a3c" : "a855f7", en() ? "Storage" : "Disco", used, 'd',
+			     std::to_string(used) + "%", gb_text(d.free) + "\x1e" + (en() ? "free" : "libres"));
 		}
 	}
 	if (g_pad && !g_battery.empty()) {
