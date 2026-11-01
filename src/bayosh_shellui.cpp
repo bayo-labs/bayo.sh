@@ -3079,7 +3079,9 @@ void tile_fx_tick() {
 	const uint32_t rgb = g_wall_rgb.load();
 	const long     now = now_ms();
 	static float last_geo[4] = {-1, -1, -1, -1};
-	const float  round_mode  = g_tile_follow.load() ? 1.0f : 0.0f;
+	// v0.5.2: always the rounded outline (user: the frame must take the tile's shape). The default spot
+	// is now measured on a real console, so it no longer shows as a block when not detected.
+	const float  round_mode  = 1.0f;
 	if (!g_tfx_shown || last_geo[0] != x0 || last_geo[1] != y0 || last_geo[2] != s || last_geo[3] != round_mode) { // place the rings
 		g_tfx_shown = true;
 		last_geo[0] = x0;
@@ -3089,7 +3091,7 @@ void tile_fx_tick() {
 		for (int i = 0; i < 2; ++i) { // rounded: glow 8 px out, rim 4 px out, corners like the tile's
 			const float pad = i == 0 ? 8.0f : 4.0f;
 			wg_rect(g_halo_round[i], x0 - pad, y0 - pad, s + 2 * pad, s + 2 * pad);
-			wg_round(g_halo_round[i], s * 0.07f + pad);
+			wg_round(g_halo_round[i], s * 0.115f + pad); // PS5 tiles: ~11% corner radius (photo)
 			wg_visible(g_halo_round[i], round_mode > 0);
 		}
 		for (int i = 0; i < kHaloRings && round_mode > 0; ++i) wg_visible(g_halo[i], false);
@@ -3151,7 +3153,7 @@ void tile_fx_tick() {
 		b = bb + (1 - bb) * lift;
 		void* glow = tint_q(r, g, b, preview ? 0.45f : 0.16f + 0.10f * (0.5f + 0.5f * sinf(now / 900.0f)) + 0.20f * kick);
 		void* rim  = tint_q(r, g, b, 1.0f);
-		if (g_tile_follow.load()) {
+		if (round_mode > 0) {
 			if (glow != nullptr) property_set(g_dim_class, g_halo_round[0], g_dim_prop, glow);
 			if (rim != nullptr) property_set(g_dim_class, g_halo_round[1], g_dim_prop, rim);
 		} else {
