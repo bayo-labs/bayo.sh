@@ -1895,7 +1895,7 @@ struct Slot {
 };
 // v0.5.1 compact (user: too big): 626 x 178 in all. The system font cannot shrink (~14 px a
 // character, ~30 px a line), so tiles are sized to two lines of text.
-const Slot kSlot[kWgRows] = {{'t', 0, 230, 78, kClock}, {'w', 0, 193, 78, kText}, {'j', 0, 183, 78, kText},
+const Slot kSlot[kWgRows] = {{'t', 0, 246, 78, kClock}, {'w', 0, 185, 78, kText}, {'j', 0, 175, 78, kText},
                              {'c', 1, 202, 92, kGauge}, {'d', 1, 202, 92, kGauge}, {'p', 1, 202, 92, kGauge}};
 const float kWgGap   = 8.0f;
 const float kRowTopH = 78.0f, kRowBotH = 92.0f;
@@ -1904,6 +1904,9 @@ Obj   g_wg_card        = nullptr; // container
 Obj   g_wg_glow[kWgRows] = {}, g_wg_rim[kWgRows] = {}, g_wg_tile[kWgRows] = {};
 Obj   g_wg_title[kWgRows] = {}, g_wg_value[kWgRows] = {}, g_wg_sub[kWgRows] = {};
 Obj   g_wg_dot[kWgRows][kDots] = {};
+Obj   g_wg_shine[kWgRows] = {};          // v0.5.2: a band of light that crosses each tile now and then
+float g_wg_bx[kWgRows] = {}, g_wg_by[kWgRows] = {}; // tile place from the layout (before the float)
+bool  g_wg_clip = false;                 // tiles clip their children (needed for the shine)
 Obj   g_wg_seg[kSegs] = {};
 Obj   g_wg_colon[2] = {};
 bool  g_wg_present[kWgRows] = {};
@@ -2051,6 +2054,12 @@ bool wg_build() {
 		g_wg_tile[i]   = wg_panel(g_wg_card, 0, 0, sl.w, sl.h, tint_q(0.03f, 0.04f, 0.11f, 0.86f), "widget tile");
 		if (g_wg_tile[i] == nullptr) return false;
 		wg_round(g_wg_tile[i], 12.0f);
+		if (i == 0) g_wg_clip = has_setter(g_ui3_widget, "ClipChildren");
+		if (g_wg_clip) { // only when the tile can clip it: otherwise the band would show outside
+			bool on = true;
+			property_set(g_ui3_widget, g_wg_tile[i], "ClipChildren", &on);
+			g_wg_shine[i] = wg_panel(g_wg_tile[i], -60.0f, 0.0f, 34.0f, sl.h, tint_q(1.0f, 1.0f, 1.0f, 0.09f), "widget shine");
+		}
 		const float* a = kWgAccent[i];
 		if (sl.type == kClock) {
 			for (int d = 0; d < 4; ++d) {
@@ -2065,8 +2074,8 @@ bool wg_build() {
 			g_wg_colon[1] = wg_panel(g_wg_tile[i], 68.0f, 45.0f, 5.0f, 5.0f, nullptr, "clock colon");
 			wg_round(g_wg_colon[0], 2.0f);
 			wg_round(g_wg_colon[1], 2.0f);
-			g_wg_title[i] = wg_label(g_wg_tile[i], 142.0f, 4.0f, sl.w - 148.0f, 34.0f, 0.93f, 0.94f, 1.0f);  // "sáb 31"
-			g_wg_value[i] = wg_label(g_wg_tile[i], 142.0f, 38.0f, sl.w - 148.0f, 34.0f, 0.60f, 0.64f, 0.78f); // "oct"
+			g_wg_title[i] = wg_label(g_wg_tile[i], 140.0f, 4.0f, sl.w - 142.0f, 34.0f, 0.93f, 0.94f, 1.0f);  // "sáb 31"
+			g_wg_value[i] = wg_label(g_wg_tile[i], 140.0f, 38.0f, sl.w - 142.0f, 34.0f, 0.60f, 0.64f, 0.78f); // "oct"
 		} else if (sl.type == kGauge) {
 			const float cx = kRingCX, cy = 46.0f, r = 34.0f;
 			for (int k = 0; k < kDots; ++k) {
@@ -2085,7 +2094,7 @@ bool wg_build() {
 		wg_visible(g_wg_rim[i], false);
 		wg_visible(g_wg_tile[i], false);
 	}
-	wp_log("widgets: dashboard built");
+	wp_log("widgets: dashboard built (shine %s)", g_wg_clip ? "on" : "off: no ClipChildren");
 	return true;
 }
 
@@ -2109,6 +2118,8 @@ float wg_layout(float& width) {
 		const Slot& sl = kSlot[i];
 		const float x = at[sl.row], y = row_y[sl.row];
 		at[sl.row] += sl.w + kWgGap;
+		g_wg_bx[i] = x;
+		g_wg_by[i] = y;
 		wg_rect(g_wg_glow[i], x - 4.0f, y - 4.0f, sl.w + 8.0f, sl.h + 8.0f);
 		wg_rect(g_wg_rim[i], x - 2.0f, y - 2.0f, sl.w + 4.0f, sl.h + 4.0f);
 		wg_rect(g_wg_tile[i], x, y, sl.w, sl.h);
@@ -2394,6 +2405,23 @@ void wg_anim() {
 		property_set(g_ui3_widget, g_wg_value[i], "X", const_cast<float*>(&x));
 		wg_opacity(g_wg_value[i], e);
 		if (e >= 1.0f) g_wg_val_t[i] = 0;
+	}
+	// v0.5.2: the tiles float gently, one after another like a wave (3 px), and a band of light
+	// crosses each tile's glass every few seconds, tile after tile
+	for (int i = 0; i < kWgRows; ++i) {
+		if (!g_wg_present[i]) continue;
+		const float off = 3.0f * sinf(now / 900.0f - i * 0.8f);
+		const float y   = g_wg_by[i] + off;
+		const float gy = y - 4.0f, ry = y - 2.0f;
+		property_set(g_ui3_widget, g_wg_tile[i], "Y", const_cast<float*>(&y));
+		property_set(g_ui3_widget, g_wg_rim[i], "Y", const_cast<float*>(&ry));
+		property_set(g_ui3_widget, g_wg_glow[i], "Y", const_cast<float*>(&gy));
+		if (g_wg_shine[i] != nullptr) {
+			const long  cycle = 7000, start = (now + i * 450) % cycle; // 0.45 s apart
+			const float e     = start < 900 ? start / 900.0f : -1.0f;
+			const float sx    = e < 0 ? -60.0f : -40.0f + (kSlot[i].w + 80.0f) * (e * e * (3 - 2 * e));
+			property_set(g_ui3_widget, g_wg_shine[i], "X", const_cast<float*>(&sx));
+		}
 	}
 	// clock colon blinks; a light runs round each ring's lit dots
 	const bool colon = (now / 1000) % 2 == 0;
@@ -2899,6 +2927,11 @@ bool tile_detect(float& tx, float& ty, float& ts, bool log_all) {
 		}
 	}
 	if (pick < 0) return false;
+	// must look like the highlighted game tile: upper left part of the screen, 130..280 px
+	if (best[pick].w < 130.0f || best[pick].w > 280.0f || best[pick].y > 360.0f || best[pick].x > 1400.0f) {
+		if (log_all) wp_log("tile detect: best square does not look like the game tile, keeping the saved spot");
+		return false;
+	}
 	tx = best[pick].x;
 	ty = best[pick].y;
 	ts = best[pick].w;
@@ -2941,7 +2974,8 @@ float g_sp_x[kSparks], g_sp_y[kSparks], g_sp_vx[kSparks], g_sp_vy[kSparks];
 long  g_sp_t0 = 0, g_halo_kick = 0, g_tfx_preview_fire = 0;
 int   g_tfx_seen_moves = -1, g_tfx_last_type = -1;
 bool  g_tfx_failed = false, g_tfx_built = false, g_tfx_shown = false;
-std::atomic<int> g_tile_x {176}, g_tile_y {132}, g_tile_s {172}; // from "K" (1080p coordinates)
+// v0.5.2: measured from a photo of the console (Black Myth: Wukong highlighted, second in the row)
+std::atomic<int> g_tile_x {162}, g_tile_y {118}, g_tile_s {181}; // from "K" (1080p coordinates)
 std::atomic<bool> g_tile_preview {false};
 std::atomic<bool> g_tile_follow {false}; // the tile's class is known: look it up again after each move
 std::atomic<bool> g_tile_ready {false};  // a position was saved or detected: draw the outline
@@ -3000,15 +3034,22 @@ void tfx_fire(float cx, float cy, float half, uint32_t rgb) {
 
 void tile_fx_tick() {
 	const bool preview = g_tile_preview.load();
-	if ((!g_tilefx.load() && !preview) || (!g_tile_ready.load() && !preview) || g_tfx_failed || !video_active()) {
-		tfx_hide(); // v0.5.1: nothing until the user lines it up (a guessed spot was a box in the wrong place)
+	if ((!g_tilefx.load() && !preview) || g_tfx_failed || !video_active()) {
+		tfx_hide();
 		return;
 	}
 	if (!g_tfx_built && !tfx_build()) {
 		g_tfx_failed = true;
 		return;
 	}
-	if (g_tile_detect_req.exchange(false)) { // the app's "Detectar sola"
+	static long first_seen = 0;
+	static bool auto_done  = false;
+	if (first_seen == 0) first_seen = now_ms();
+	if (!auto_done && g_tile_area == nullptr && now_ms() - first_seen > 5000) {
+		auto_done         = true; // v0.5.2: find the tile by itself once, no button needed
+		g_tile_detect_req = true;
+	}
+	if (g_tile_detect_req.exchange(false)) { // automatic once, or the app's "Detectar sola"
 		float tx, ty, ts;
 		if (tile_detect(tx, ty, ts, true)) {
 			char msg[64];

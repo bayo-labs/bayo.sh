@@ -142,7 +142,7 @@ bool en() {
 // WMO weather codes (Open-Meteo).
 const char* sky(int code) {
 	struct Row { int max; const char* es; const char* en; };
-	static const Row rows[] = {{0, "Despejado", "Clear"}, {2, "Algo nublado", "Partly cloudy"}, {3, "Nublado", "Cloudy"},
+	static const Row rows[] = {{0, "Despejado", "Clear"}, {2, "Nubes", "Some clouds"}, {3, "Nublado", "Cloudy"},
 	                           {48, "Niebla", "Fog"}, {57, "Llovizna", "Drizzle"}, {67, "Lluvia", "Rain"}, {77, "Nieve", "Snow"},
 	                           {82, "Chubascos", "Showers"}, {86, "Nieve", "Snow"}, {99, "Tormenta", "Storm"}};
 	for (const Row& r : rows) {
@@ -530,7 +530,7 @@ std::string message(const std::string& outline) {
 	if (g_temp) {
 		const int t = cpu_temperature();
 		if (t >= 0) {
-			tile(t >= 75 ? "ff4d4d" : t >= 62 ? "ff9a3c" : "2ee5b5", en() ? "Console" : "Consola", t <= 35 ? 0 : (t - 35) * 100 / 50, 'c',
+			tile(t >= 75 ? "ff4d4d" : t >= 62 ? "ff9a3c" : "2ee5b5", "PS5", t <= 35 ? 0 : (t - 35) * 100 / 50, 'c',
 			     std::to_string(t) + "°", t >= 75 ? (en() ? "Hot!" : "¡Calor!") : t >= 62 ? (en() ? "Warm" : "Tibia") : (en() ? "Cool" : "Normal"));
 		}
 	}

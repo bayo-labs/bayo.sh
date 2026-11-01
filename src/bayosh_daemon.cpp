@@ -128,7 +128,7 @@ std::string g_light_fix  = "22b8ff";
 int         g_light_speed = 1;
 bool        g_light_react = true; // v0.5: the light bar flashes with each button (PlayStation colours)
 bool        g_tile_fx     = true; // v0.5: glow behind the highlighted game + sparks when it moves
-int         g_tile_x = 176, g_tile_y = 132, g_tile_s = 172; // where that tile is drawn (1080p), set in the app
+int         g_tile_x = 162, g_tile_y = 118, g_tile_s = 181; // where that tile is drawn (1080p), set in the app
 bool        g_tile_ready  = false; // v0.5.1: lined up by the user (or detected): only then the outline shows
 bool        g_tile_follow = false; // found on screen by "Detectar sola": the module follows the tile itself
 std::string g_tile_detect_result;  // "", "ok", "none" (for the app)
@@ -428,6 +428,7 @@ void load_config() {
 		}
 	}
 	size_t            pos  = 0;
+	int               saved_tile[3] = {-1, -1, -1}; // v0.5.2: used only if the user placed it / it was detected
 	g_config_extra.clear();
 	static const char* const kKnown[] = {"enabled=", "video=", "dim=", "volume=", "blur=", "looks=", "shuffle=", "rotate=",
 	                                     "rotorder=", "mainvideo=", "gamevideos=", "gamepause=", "menuhide=", "storeonly=",
@@ -486,9 +487,9 @@ void load_config() {
 		} else if (line.rfind("tilepos=", 0) == 0) {
 			int x = 0, y = 0, sz = 0;
 			if (sscanf(line.c_str() + 8, "%d %d %d", &x, &y, &sz) == 3 && sz >= 40 && sz <= 700) {
-				g_tile_x = x;
-				g_tile_y = y;
-				g_tile_s = sz;
+				saved_tile[0] = x;
+				saved_tile[1] = y;
+				saved_tile[2] = sz;
 			}
 		} else if (line.rfind("lightspeed=", 0) == 0) {
 			g_light_speed = std::max(0, std::min(2, atoi(line.c_str() + 11)));
@@ -506,6 +507,9 @@ void load_config() {
 			}
 		}
 		pos = end + 1;
+	}
+	if (saved_tile[2] > 0 && (g_tile_ready || g_tile_follow)) {
+		g_tile_x = saved_tile[0], g_tile_y = saved_tile[1], g_tile_s = saved_tile[2];
 	}
 	log("config: %zu bytes%s, enabled=%d video=%s dim=%d shuffle=%d rotate=%d gamepause=%d", text.size(),
 	    from_bak ? " (from config.bak)" : "", g_enabled ? 1 : 0, g_current.c_str(), g_dim, g_shuffle ? 1 : 0, g_rotate,
@@ -1813,7 +1817,7 @@ bool reset_settings(std::string& error) {
 	g_light_speed = 1;
 	g_light_react = true;
 	g_tile_fx     = true;
-	g_tile_x = 176, g_tile_y = 132, g_tile_s = 172;
+	g_tile_x = 162, g_tile_y = 118, g_tile_s = 181;
 	g_tile_ready = g_tile_follow = false;
 	write_text(kMenusFile, "1\n");
 	if (g_current.empty() || !exists(g_current.c_str())) {
