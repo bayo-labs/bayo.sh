@@ -129,6 +129,9 @@ int         g_light_speed = 1;
 bool        g_light_react = true; // v0.5: the light bar flashes with each button (PlayStation colours)
 bool        g_tile_fx     = true; // v0.5: glow behind the highlighted game + sparks when it moves
 int         g_tile_x = 110, g_tile_y = 200, g_tile_s = 250; // where that tile is drawn (1080p), set in the app
+bool        g_tile_ready  = false; // v0.5.1: lined up by the user (or detected): only then the outline shows
+bool        g_tile_follow = false; // found on screen by "Detectar sola": the module follows the tile itself
+std::string g_tile_detect_result;  // "", "ok", "none" (for the app)
 long long   g_tile_preview_until = 0; // ms: show the glow strongly while the user lines it up
 bool        g_game_running = false;
 std::string g_game_title;
@@ -428,7 +431,7 @@ void load_config() {
 	g_config_extra.clear();
 	static const char* const kKnown[] = {"enabled=", "video=", "dim=", "volume=", "blur=", "looks=", "shuffle=", "rotate=",
 	                                     "rotorder=", "mainvideo=", "gamevideos=", "gamepause=", "menuhide=", "storeonly=",
-	                                     "parallax=", "light=", "lightmode=", "lightfix=", "lightspeed=", "lightreact=", "tilefx=", "tilepos="};
+	                                     "parallax=", "light=", "lightmode=", "lightfix=", "lightspeed=", "lightreact=", "tilefx=", "tilepos=", "tileready=", "tilefollow="};
 	while (pos < text.size()) {
 		const size_t      end  = text.find('\n', pos);
 		const std::string line = first_line(text.substr(pos, end == std::string::npos ? std::string::npos : end - pos));
@@ -476,6 +479,10 @@ void load_config() {
 			g_light_react = line.substr(11) != "0";
 		} else if (line.rfind("tilefx=", 0) == 0) {
 			g_tile_fx = line.substr(7) != "0";
+		} else if (line.rfind("tileready=", 0) == 0) {
+			g_tile_ready = line.substr(10) != "0";
+		} else if (line.rfind("tilefollow=", 0) == 0) {
+			g_tile_follow = line.substr(11) != "0";
 		} else if (line.rfind("tilepos=", 0) == 0) {
 			int x = 0, y = 0, sz = 0;
 			if (sscanf(line.c_str() + 8, "%d %d %d", &x, &y, &sz) == 3 && sz >= 40 && sz <= 700) {
@@ -515,7 +522,7 @@ void load_config() {
 std::string g_bak_settings; // what config.bak holds (without the video line)
 void save_config() {
 	const std::string text = g_config_extra + std::string("enabled=") + (g_enabled ? "1" : "0") + "\nvideo=" + g_current + "\ndim=" + std::to_string(g_dim) + "\nvolume=" + std::to_string(g_volume) + "\nblur=" + std::to_string(g_blur) + "\nlooks=" + looks_text() +
-	                            "\nshuffle=" + (g_shuffle ? "1" : "0") + "\nrotate=" + std::to_string(g_rotate) + "\nrotorder=" + (g_rot_order ? "order" : "random") + "\nmainvideo=" + (g_main_video ? "1" : "0") + "\ngamevideos=" + (g_game_videos ? "1" : "0") + "\ngamepause=" + (g_game_pause ? "1" : "0") + "\nmenuhide=" + (g_menu_hide ? "1" : "0") + "\nstoreonly=" + (g_store_only ? "1" : "0") + "\nparallax=" + (g_parallax ? "1" : "0") + "\nlight=" + (g_light ? "1" : "0") + "\nlightmode=" + g_light_mode + "\nlightfix=" + g_light_fix + "\nlightspeed=" + std::to_string(g_light_speed) + "\nlightreact=" + (g_light_react ? "1" : "0") + "\ntilefx=" + (g_tile_fx ? "1" : "0") + "\ntilepos=" + std::to_string(g_tile_x) + " " + std::to_string(g_tile_y) + " " + std::to_string(g_tile_s) + "\n";
+	                            "\nshuffle=" + (g_shuffle ? "1" : "0") + "\nrotate=" + std::to_string(g_rotate) + "\nrotorder=" + (g_rot_order ? "order" : "random") + "\nmainvideo=" + (g_main_video ? "1" : "0") + "\ngamevideos=" + (g_game_videos ? "1" : "0") + "\ngamepause=" + (g_game_pause ? "1" : "0") + "\nmenuhide=" + (g_menu_hide ? "1" : "0") + "\nstoreonly=" + (g_store_only ? "1" : "0") + "\nparallax=" + (g_parallax ? "1" : "0") + "\nlight=" + (g_light ? "1" : "0") + "\nlightmode=" + g_light_mode + "\nlightfix=" + g_light_fix + "\nlightspeed=" + std::to_string(g_light_speed) + "\nlightreact=" + (g_light_react ? "1" : "0") + "\ntilefx=" + (g_tile_fx ? "1" : "0") + "\ntilepos=" + std::to_string(g_tile_x) + " " + std::to_string(g_tile_y) + " " + std::to_string(g_tile_s) + "\ntileready=" + (g_tile_ready ? "1" : "0") + "\ntilefollow=" + (g_tile_follow ? "1" : "0") + "\n";
 	// v0.4: after a reboot both files were found empty (the data never reached the disk before the
 	// console went down; the rotation rewrites the config every few minutes). Write a temporary file,
 	// flush it, rename it over. config.bak is the safe copy: it is only rewritten when a SETTING
@@ -686,6 +693,8 @@ void* ui_thread(void*) {
 			(buf[0] == 'S' ? g_ui_status_set : g_ui_focus_set) = true;
 		} else if (buf[0] == 'B') {
 			widgets_battery(std::string(buf + 1, static_cast<size_t>(n - 1)));
+		} else if (buf[0] == 'T') {
+			tile_detected(std::string(buf + 1, static_cast<size_t>(n - 1)));
 		} else if (buf[0] == 'L' && lf >= 0) {
 			struct stat st {};
 			if (fstat(lf, &st) == 0 && st.st_size > 2 * 1024 * 1024) {
@@ -1485,6 +1494,9 @@ State get_state() {
 		st.tile_x      = g_tile_x;
 		st.tile_y      = g_tile_y;
 		st.tile_s      = g_tile_s;
+		st.tile_ready  = g_tile_ready;
+		st.tile_follow = g_tile_follow;
+		st.tile_det    = g_tile_detect_result;
 		st.game       = g_game_running ? g_game_title : std::string();
 	}
 	st.status = shellui_status();
@@ -1638,10 +1650,37 @@ bool set_tile_pos(int x, int y, int size, bool save) {
 	g_tile_s             = size;
 	g_tile_preview_until = save ? 0 : tile_clock_ms() + 20000;
 	if (save) {
+		g_tile_ready  = true;
+		g_tile_follow = false; // placed by hand
 		save_config();
 		log("tile fx: position %d %d size %d", x, y, size);
 	}
 	return true;
+}
+
+// v0.5.1: ask the module to find the highlighted tile on screen ("Detectar sola"). The answer comes
+// back as "T x y s" or "T none" (ui_thread) and shows in /api/state as tiledet.
+void tile_detect_request() {
+	{
+		std::lock_guard<std::mutex> lock(g_ctl);
+		g_tile_detect_result.clear();
+		g_tile_preview_until = tile_clock_ms() + 8000; // the module only looks while the effect is on
+	}
+	send_module("X tiledetect " + std::to_string(static_cast<long long>(tile_clock_ms())));
+}
+
+void tile_detected(const std::string& msg) {
+	int x = 0, y = 0, sz = 0;
+	std::lock_guard<std::mutex> lock(g_ctl);
+	if (sscanf(msg.c_str(), "%d %d %d", &x, &y, &sz) == 3 && sz >= 40 && sz <= 700) {
+		g_tile_x = x, g_tile_y = y, g_tile_s = sz;
+		g_tile_ready = g_tile_follow = true;
+		g_tile_detect_result = "ok";
+		save_config();
+	} else {
+		g_tile_detect_result = "none";
+	}
+	log("tile fx: detect -> %s", msg.c_str());
 }
 
 bool set_option(const std::string& key, bool on, std::string& error) {
@@ -1775,6 +1814,7 @@ bool reset_settings(std::string& error) {
 	g_light_react = true;
 	g_tile_fx     = true;
 	g_tile_x = 110, g_tile_y = 200, g_tile_s = 250;
+	g_tile_ready = g_tile_follow = false;
 	write_text(kMenusFile, "1\n");
 	if (g_current.empty() || !exists(g_current.c_str())) {
 		const std::vector<Video> videos = list_videos();
@@ -2357,7 +2397,7 @@ void light_step() {
 			if (col.size() != 6) col = "22b8ff";
 			k = std::string("K ") + (g_light_react && g_light ? "1" : "0") + " " + (g_tile_fx ? "1" : "0") + " " + col + " " +
 			    std::to_string(g_tile_x) + " " + std::to_string(g_tile_y) + " " + std::to_string(g_tile_s) + " " +
-			    (tile_clock_ms() < g_tile_preview_until ? "1" : "0");
+			    (tile_clock_ms() < g_tile_preview_until ? "1" : "0") + " " + (g_tile_ready ? "1" : "0") + " " + (g_tile_follow ? "1" : "0");
 		}
 		static int         kbeat = 0;
 		if (k != last_k || ++kbeat >= 10) {

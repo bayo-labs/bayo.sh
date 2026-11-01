@@ -144,7 +144,7 @@ std::string sites_json() {
 std::string state_json() {
 	const State st = get_state();
 	std::string j  = std::string("{\"enabled\":") + (st.enabled ? "true" : "false") + ",\"dim\":" + std::to_string(st.dim) + ",\"volume\":" + std::to_string(st.volume) +
-	                ",\"blur\":" + std::to_string(st.blur) + ",\"looks\":[" + std::to_string(st.looks[0]) + "," + std::to_string(st.looks[1]) + "," + std::to_string(st.looks[2]) + "," + std::to_string(st.looks[3]) + "]" + ",\"shuffle\":" + (st.shuffle ? "true" : "false") + ",\"rotate\":" + std::to_string(st.rotate) + ",\"rotord\":" + (st.rot_order ? "1" : "0") + ",\"mainvideo\":" + (st.main_video ? "true" : "false") + ",\"gamevideos\":" + (st.game_videos ? "true" : "false") + ",\"gamepause\":" + (st.game_pause ? "true" : "false") + ",\"menuhide\":" + (st.menu_hide ? "true" : "false") + ",\"storeonly\":" + (st.store_only ? "true" : "false") + ",\"parallax\":" + (st.parallax ? "true" : "false") + ",\"light\":" + (st.light ? "true" : "false") + ",\"guided\":" + (st.guided ? "true" : "false") + ",\"lightnow\":" + json_str(st.light_now) + ",\"lightmode\":" + json_str(st.light_mode) + ",\"lightfix\":" + json_str(st.light_fix) + ",\"lightspeed\":" + std::to_string(st.light_speed) + ",\"lightreact\":" + (st.light_react ? "true" : "false") + ",\"tilefx\":" + (st.tile_fx ? "true" : "false") + ",\"tilepos\":[" + std::to_string(st.tile_x) + "," + std::to_string(st.tile_y) + "," + std::to_string(st.tile_s) + "]" +
+	                ",\"blur\":" + std::to_string(st.blur) + ",\"looks\":[" + std::to_string(st.looks[0]) + "," + std::to_string(st.looks[1]) + "," + std::to_string(st.looks[2]) + "," + std::to_string(st.looks[3]) + "]" + ",\"shuffle\":" + (st.shuffle ? "true" : "false") + ",\"rotate\":" + std::to_string(st.rotate) + ",\"rotord\":" + (st.rot_order ? "1" : "0") + ",\"mainvideo\":" + (st.main_video ? "true" : "false") + ",\"gamevideos\":" + (st.game_videos ? "true" : "false") + ",\"gamepause\":" + (st.game_pause ? "true" : "false") + ",\"menuhide\":" + (st.menu_hide ? "true" : "false") + ",\"storeonly\":" + (st.store_only ? "true" : "false") + ",\"parallax\":" + (st.parallax ? "true" : "false") + ",\"light\":" + (st.light ? "true" : "false") + ",\"guided\":" + (st.guided ? "true" : "false") + ",\"lightnow\":" + json_str(st.light_now) + ",\"lightmode\":" + json_str(st.light_mode) + ",\"lightfix\":" + json_str(st.light_fix) + ",\"lightspeed\":" + std::to_string(st.light_speed) + ",\"lightreact\":" + (st.light_react ? "true" : "false") + ",\"tilefx\":" + (st.tile_fx ? "true" : "false") + ",\"tilepos\":[" + std::to_string(st.tile_x) + "," + std::to_string(st.tile_y) + "," + std::to_string(st.tile_s) + "]" + ",\"tileready\":" + (st.tile_ready ? "true" : "false") + ",\"tilefollow\":" + (st.tile_follow ? "true" : "false") + ",\"tiledet\":" + json_str(st.tile_det) +
 	                ",\"mods\":" + (menu_mods_present() ? "true" : "false") + ",\"dl\":" + download_json() + ",\"sites\":" + sites_json() + ",\"widgets\":" + widgets_json() + ",\"ip\":" + json_str(st.ip) + ",\"port\":" + std::to_string(kWebPort) + ",\"games\":" + json_str(games_text()) + ",\"game\":" + json_str(st.game) + ",\"status\":" + json_str(st.status) + ",\"current\":" + json_str(st.current) + ",\"videos\":[";
 	for (size_t i = 0; i < st.videos.size(); ++i) {
 		const Video& v = st.videos[i];
@@ -662,8 +662,13 @@ void handle(int fd) {
 			while (p != std::string::npos && p > 0 && query[p - 1] != '&') p = query.find(key, p + 1);
 			return p == std::string::npos ? def : atoi(query.c_str() + p + key.size());
 		};
-		const bool ok = set_tile_pos(arg("x", -9999), arg("y", -9999), arg("s", 0), arg("save", 0) == 1);
-		reply_json(fd, result_json(ok, "Invalid position"));
+		if (arg("detect", 0) == 1) {
+			tile_detect_request();
+			reply_json(fd, result_json(true, error));
+		} else {
+			const bool ok = set_tile_pos(arg("x", -9999), arg("y", -9999), arg("s", 0), arg("save", 0) == 1);
+			reply_json(fd, result_json(ok, "Invalid position"));
+		}
 	} else if (path == "/api/set") {
 		// /api/set?k=shuffle&v=1
 		const size_t k = query.find("k="), v = query.find("v=");

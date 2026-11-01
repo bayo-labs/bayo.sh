@@ -449,7 +449,7 @@ std::string clock_text(time_t now) {
 	char     b[96];
 	if (en()) {
 		// the board's 7-segment digits take "9:41"; "Sat 31" / "Oct · PM" go beside them (\x1e splits the lines)
-		snprintf(b, sizeof(b), "%d:%02d\x1f%s %d\x1e%s · %s", l.tm_hour % 12 == 0 ? 12 : l.tm_hour % 12, l.tm_min, kDayEn[l.tm_wday],
+		snprintf(b, sizeof(b), "%d:%02d\x1f%s %d\x1e%s %s", l.tm_hour % 12 == 0 ? 12 : l.tm_hour % 12, l.tm_min, kDayEn[l.tm_wday],
 		         l.tm_mday, kMonEn[l.tm_mon], l.tm_hour < 12 ? "AM" : "PM");
 	} else {
 		snprintf(b, sizeof(b), "%02d:%02d\x1f%s %d %s", l.tm_hour, l.tm_min, kDayEs[l.tm_wday], l.tm_mday, kMonEs[l.tm_mon]);
@@ -518,7 +518,7 @@ std::string message(const std::string& outline) {
 			const std::string temp = g_weather_text.substr(0, dot);
 			const std::string sky  = dot == std::string::npos ? std::string() : g_weather_text.substr(dot + strlen(" · "));
 			const std::string both = temp + " · " + sky;
-			const bool        fits = both.size() <= 15; // bytes; "°" and "·" take two each
+			const bool        fits = both.size() <= 14; // bytes ("°" and "·" take two): ~11 characters fit the tile
 			tile(weather_color(g_wcode, g_day), title, -1, 'w', fits ? both : temp, fits ? std::string() : sky);
 		}
 	}
@@ -531,7 +531,7 @@ std::string message(const std::string& outline) {
 		const int t = cpu_temperature();
 		if (t >= 0) {
 			tile(t >= 75 ? "ff4d4d" : t >= 62 ? "ff9a3c" : "2ee5b5", en() ? "Console" : "Consola", t <= 35 ? 0 : (t - 35) * 100 / 50, 'c',
-			     std::to_string(t) + "°", t >= 75 ? (en() ? "Hot!" : "¡Calor!") : t >= 62 ? (en() ? "Warm" : "Caliente") : (en() ? "All good" : "Todo bien"));
+			     std::to_string(t) + "°", t >= 75 ? (en() ? "Hot!" : "¡Calor!") : t >= 62 ? (en() ? "Warm" : "Tibia") : (en() ? "Cool" : "Normal"));
 		}
 	}
 	if (g_disk) {
@@ -547,7 +547,7 @@ std::string message(const std::string& outline) {
 		const std::string pct      = charging ? g_battery.substr(1) : g_battery;
 		const int         n        = atoi(pct.c_str());
 		tile(charging ? "7cff00" : n <= 20 ? "ff4d4d" : n <= 40 ? "ffb020" : "22b8ff", en() ? "Controller" : "Control", n, 'p', pct + "%",
-		     charging ? (en() ? "Charging" : "Cargando") : n <= 20 ? (en() ? "Low" : "Baja") : "DualSense");
+		     charging ? (en() ? "Charging" : "Cargando") : n <= 20 ? (en() ? "Low" : "Baja") : (en() ? "Battery" : "Batería"));
 	}
 	return m;
 }

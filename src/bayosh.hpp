@@ -53,6 +53,8 @@ struct State {
 	bool               light_react = true;     // v0.5: flash with each button
 	bool               tile_fx     = true;     // v0.5: glow + sparks on the highlighted game
 	int                tile_x = 110, tile_y = 200, tile_s = 250; // where that tile is drawn
+	bool               tile_ready = false, tile_follow = false;   // lined up / found on screen
+	std::string        tile_det;                                  // last "Detectar sola": "", ok, none
 	std::string        game;               // title id of the running game ("" = none)
 	std::string        current;  // real path of the chosen clip ("" = none)
 	std::string        status;   // ShellUI status line: playing / stopped / failed / starting
@@ -74,6 +76,8 @@ void set_blur(int level);  // 0 off, 1 light, 2 strong
 void set_look(const std::string& key, int level); // "bottom", "top", "vignette", "haze"; 0..2
 bool set_option(const std::string& key, bool on, std::string& error); // "shuffle", "gamepause", "menuhide", "parallax"
 bool set_tile_pos(int x, int y, int size, bool save); // v0.5: highlighted tile spot; save=false previews 20 s
+void tile_detect_request();                 // v0.5.1: the module looks for the highlighted tile on screen
+void tile_detected(const std::string& msg); // its answer: "x y s" or "none"
 bool delete_video(const std::string& path, std::string& error);
 // Light bar colour of a clip: <clip>.color next to it, "RRGGBB" (the page measures it).
 std::string clip_color(const std::string& path);
