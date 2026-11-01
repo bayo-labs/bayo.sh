@@ -2373,7 +2373,7 @@ void wg_anim() {
 	auto ease = [](float p) { p = p < 0 ? 0 : p > 1 ? 1 : p; return 1.0f - (1.0f - p) * (1.0f - p) * (1.0f - p); };
 	if (g_wg_card_t != 0) { // the board rises into place
 		const float e = ease((now - g_wg_card_t) / 700.0f);
-		const float y = g_wg_card_y + 60.0f * (1.0f - e);
+		const float y = g_wg_card_y + 40.0f * (1.0f - e);
 		property_set(g_ui3_widget, g_wg_card, "Y", const_cast<float*>(&y));
 		wg_opacity(g_wg_card, e);
 		if (e >= 1.0f) g_wg_card_t = 0;
@@ -2532,7 +2532,9 @@ void widgets_tick() {
 	}
 	float       w = 0;
 	const float h = wg_layout(w);
-	const float x = 1920.0f - 64.0f - w, y = 1080.0f - 66.0f - h;
+	// v0.5.2: top right, under the PS5's own clock and icons; at the bottom Sony's hub cards
+	// (Trofeos, Amigos que juegan, the "1h" badge) were drawn over the board.
+	const float x = 1920.0f - 72.0f - w, y = 178.0f;
 	property_set(g_ui3_widget, g_wg_card, "X", const_cast<float*>(&x));
 	property_set(g_ui3_widget, g_wg_card, "Width", &w);
 	property_set(g_ui3_widget, g_wg_card, "Height", const_cast<float*>(&h));
@@ -2540,7 +2542,7 @@ void widgets_tick() {
 	const bool visible = rows > 0;
 	if (visible && !g_wg_card_on) {
 		g_wg_card_t = now_ms(); // entrance
-		const float y0 = y + 60.0f;
+		const float y0 = y + 40.0f;
 		property_set(g_ui3_widget, g_wg_card, "Y", const_cast<float*>(&y0));
 		wg_opacity(g_wg_card, 0.0f);
 	} else if (g_wg_card_t == 0) {
@@ -2929,7 +2931,9 @@ bool tile_detect(float& tx, float& ty, float& ts, bool log_all) {
 // behind the home screen, so a rounded panel a few pixels larger than the tile only shows as a rim
 // around it; a second, wider and fainter one is the glow. The rim's colour travels around the
 // wallpaper's colour (blue -> purple -> pink for a blue wallpaper), like a gradient in motion.
-constexpr int kHaloRings = 2; // 0 = glow (wide, faint), 1 = rim (tight, bright)
+// v0.5.2: a hollow frame of 8 strips (4 glow + 4 rim), so even when it is not lined up yet it reads
+// as a frame and never as a solid box (a full panel behind the tile showed as a pink block).
+constexpr int kHaloRings = 8; // 0..3 glow strips (wide, faint), 4..7 rim strips (thin, bright)
 constexpr int kSparks    = 20;
 Obj   g_halo[kHaloRings] = {};
 Obj   g_spark[kSparks]   = {};
@@ -2937,7 +2941,7 @@ float g_sp_x[kSparks], g_sp_y[kSparks], g_sp_vx[kSparks], g_sp_vy[kSparks];
 long  g_sp_t0 = 0, g_halo_kick = 0, g_tfx_preview_fire = 0;
 int   g_tfx_seen_moves = -1, g_tfx_last_type = -1;
 bool  g_tfx_failed = false, g_tfx_built = false, g_tfx_shown = false;
-std::atomic<int> g_tile_x {110}, g_tile_y {200}, g_tile_s {250}; // from "K" (1080p coordinates)
+std::atomic<int> g_tile_x {176}, g_tile_y {132}, g_tile_s {172}; // from "K" (1080p coordinates)
 std::atomic<bool> g_tile_preview {false};
 std::atomic<bool> g_tile_follow {false}; // the tile's class is known: look it up again after each move
 std::atomic<bool> g_tile_ready {false};  // a position was saved or detected: draw the outline
@@ -3030,9 +3034,16 @@ void tile_fx_tick() {
 		last_geo[1] = y0;
 		last_geo[2] = s;
 		for (int i = 0; i < kHaloRings; ++i) {
-			const float pad = i == 0 ? 7.0f : 4.0f;
-			wg_rect(g_halo[i], x0 - pad, y0 - pad, s + 2 * pad, s + 2 * pad);
-			wg_round(g_halo[i], s * 0.075f + pad);
+			const bool  rim = i >= 4;
+			const float pad = rim ? 4.0f : 8.0f, th = rim ? 3.0f : 7.0f; // outside the tile / thickness
+			const float L = x0 - pad, T = y0 - pad, W = s + 2 * pad, cr = s * 0.07f; // corner: stay clear of it
+			switch (i % 4) {
+			case 0: wg_rect(g_halo[i], L + cr, T, W - 2 * cr, th); break;          // top
+			case 1: wg_rect(g_halo[i], L + cr, T + W - th, W - 2 * cr, th); break; // bottom
+			case 2: wg_rect(g_halo[i], L, T + cr, th, W - 2 * cr); break;          // left
+			default: wg_rect(g_halo[i], L + W - th, T + cr, th, W - 2 * cr); break; // right
+			}
+			wg_round(g_halo[i], th * 0.5f);
 			wg_visible(g_halo[i], true);
 		}
 	}
@@ -3080,8 +3091,10 @@ void tile_fx_tick() {
 		b = bb + (1 - bb) * lift;
 		void* glow = tint_q(r, g, b, preview ? 0.45f : 0.16f + 0.10f * (0.5f + 0.5f * sinf(now / 900.0f)) + 0.20f * kick);
 		void* rim  = tint_q(r, g, b, 1.0f);
-		if (glow != nullptr) property_set(g_dim_class, g_halo[0], g_dim_prop, glow);
-		if (rim != nullptr) property_set(g_dim_class, g_halo[1], g_dim_prop, rim);
+		for (int k = 0; k < kHaloRings; ++k) {
+			void* col = k >= 4 ? rim : glow;
+			if (col != nullptr) property_set(g_dim_class, g_halo[k], g_dim_prop, col);
+		}
 	}
 	// sparks fly out, fall a little and fade
 	if (g_sp_t0 != 0) {

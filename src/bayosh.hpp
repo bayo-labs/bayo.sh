@@ -52,7 +52,7 @@ struct State {
 	int                light_speed = 1;        // 0 slow, 1 normal, 2 fast
 	bool               light_react = true;     // v0.5: flash with each button
 	bool               tile_fx     = true;     // v0.5: glow + sparks on the highlighted game
-	int                tile_x = 110, tile_y = 200, tile_s = 250; // where that tile is drawn
+	int                tile_x = 176, tile_y = 132, tile_s = 172; // where that tile is drawn
 	bool               tile_ready = false, tile_follow = false;   // lined up / found on screen
 	std::string        tile_det;                                  // last "Detectar sola": "", ok, none
 	std::string        game;               // title id of the running game ("" = none)

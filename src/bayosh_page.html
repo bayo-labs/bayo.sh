@@ -615,7 +615,7 @@ function arm(b,l){if(b.className.indexOf(' arm')>=0)return 1;var o=b.innerHTML;b
 function del(n){var b=$('del'+n),v=S.videos[n];if(!b||!v||!arm(b,tr('¿Seguro?')))return;busy=1;get('/api/delete?'+vq(n,v),function(r){busy=0;key.v=0;toast(r.ok?tr('Borrado: {0}',nice(v.name)):(r.error||tr('No se pudo')),!r.ok);poll()})}
 /* v0.5: line up the glow + sparks with the highlighted game tile (live preview on the PS5) */
 var TP=null;
-function tilePos(){TP=(S&&S.tilepos||[110,200,250]).slice();var B=function(l,a){return'<button class="b fx" style="min-width:56px;font-size:18px" onclick="tpMove('+a+')">'+l+'</button>'};
+function tilePos(){TP=(S&&S.tilepos||[176,132,172]).slice();var B=function(l,a){return'<button class="b fx" style="min-width:56px;font-size:18px" onclick="tpMove('+a+')">'+l+'</button>'};
  modal('<h3>'+tr('Ajustar posición')+'</h3><p>'+tr('Mira tu inicio: el contorno se ve fuerte y salen chispas. Muévelo hasta que rodee justo al juego elegido.')+'</p>'+
  '<div style="display:grid;grid-template-columns:repeat(3,auto);gap:8px;justify-content:center;margin:14px 0">'+'<span></span>'+B('↑','0,-10,0')+'<span></span>'+B('←','-10,0,0')+'<span id="tpv" style="align-self:center;text-align:center;font-variant-numeric:tabular-nums;color:var(--sub)"></span>'+B('→','10,0,0')+'<span></span>'+B('↓','0,10,0')+'<span></span></div>'+
  '<div class="btns" style="justify-content:center">'+B('−','0,0,-10')+'<span style="align-self:center;color:var(--sub)">'+tr('Tamaño')+'</span>'+B('+','0,0,10')+'</div>'+
@@ -624,7 +624,7 @@ function tpDetect(){toast(tr('Buscando el juego en tu inicio…'));get('/api/til
 function tpShow(){var v=$('tpv');if(v)v.textContent=TP[0]+', '+TP[1]+' · '+TP[2]}
 function tpSend(save){tpShow();get('/api/tilepos?x='+TP[0]+'&y='+TP[1]+'&s='+TP[2]+(save?'&save=1':''),function(r){if(save){toast(r.ok?tr('Posición guardada'):(r.error||tr('No se pudo')),!r.ok);poll()}})}
 function tpMove(dx,dy,ds){TP[0]=Math.max(-200,Math.min(1900,TP[0]+dx));TP[1]=Math.max(-200,Math.min(1060,TP[1]+dy));TP[2]=Math.max(40,Math.min(700,TP[2]+ds));tpSend(0)}
-function tpReset(){TP=[110,200,250];tpSend(0)}
+function tpReset(){TP=[176,132,172];tpSend(0)}
 function tpSave(){if(S)S.tilepos=TP.slice();shut();tpSend(1)}
 function opt(k){if(!S)return;var on=!S[k];S[k]=on;render();get('/api/set?k='+k+'&v='+(on?1:0),function(r){if(!r.ok){S[k]=!on;render()}toast(r.ok?(k=='light'?(on?'Luz del control encendida':'Luz del control apagada'):'Guardado'):(r.error||'No se pudo'),!r.ok);poll()})}
 function seg(k,v){if(!S)return;if(k=='wfx'){if(S.widgets)S.widgets.fx=v;upd();wSet('fx',v);return}if(k=='lspeed'){setLight(null,null,v);return}var u;if(k.charAt(0)=='l'&&k.length==2){S.looks=S.looks||[0,0,0,0];S.looks[+k.charAt(1)]=v;u='/api/look?k='+LK[+k.charAt(1)]+'&v='+v}else{S[k]=v;u='/api/'+k+'?v='+v}render();get(u,function(r){toast(r.ok?'Guardado':'No se pudo. Revisa bayosh.log',!r.ok)})}

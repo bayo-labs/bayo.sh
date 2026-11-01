@@ -128,7 +128,7 @@ std::string g_light_fix  = "22b8ff";
 int         g_light_speed = 1;
 bool        g_light_react = true; // v0.5: the light bar flashes with each button (PlayStation colours)
 bool        g_tile_fx     = true; // v0.5: glow behind the highlighted game + sparks when it moves
-int         g_tile_x = 110, g_tile_y = 200, g_tile_s = 250; // where that tile is drawn (1080p), set in the app
+int         g_tile_x = 176, g_tile_y = 132, g_tile_s = 172; // where that tile is drawn (1080p), set in the app
 bool        g_tile_ready  = false; // v0.5.1: lined up by the user (or detected): only then the outline shows
 bool        g_tile_follow = false; // found on screen by "Detectar sola": the module follows the tile itself
 std::string g_tile_detect_result;  // "", "ok", "none" (for the app)
@@ -1813,7 +1813,7 @@ bool reset_settings(std::string& error) {
 	g_light_speed = 1;
 	g_light_react = true;
 	g_tile_fx     = true;
-	g_tile_x = 110, g_tile_y = 200, g_tile_s = 250;
+	g_tile_x = 176, g_tile_y = 132, g_tile_s = 172;
 	g_tile_ready = g_tile_follow = false;
 	write_text(kMenusFile, "1\n");
 	if (g_current.empty() || !exists(g_current.c_str())) {

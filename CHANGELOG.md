@@ -13,7 +13,7 @@
   orillas del cajón cada vez que te mueves. No aparece hasta ajustarlo: en Efectos → **Ajustar
   posición**, **Detectar sola** busca el cajón en el menú y el contorno lo sigue al moverte (solo
   recorre la fila de juegos); si no lo encuentra, se acomoda con flechas y tamaño, con vista previa.
-- **Tablero de widgets** (626 × 178 px): dos filas alineadas a la derecha. Arriba, un **reloj digital** de 7
+- **Tablero de widgets** (626 × 178 px, arriba a la derecha bajo la hora del PS5): dos filas alineadas a la derecha. Arriba, un **reloj digital** de 7
   segmentos con la fecha al lado, el **clima** (con tu colonia) y **Jugado hoy**. Abajo, tres
   **medidores de anillo**: **Consola** (temperatura), **Disco** (lo que queda libre) y **Control**
   (batería), con una luz que recorre el anillo. Cada mosaico se apaga por separado y los demás se
