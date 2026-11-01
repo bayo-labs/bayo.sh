@@ -127,7 +127,9 @@ std::string g_light_mode = "follow"; // follow | fixed | rainbow | breathe | wav
 std::string g_light_fix  = "22b8ff";
 int         g_light_speed = 1;
 bool        g_light_react = true; // v0.5: the light bar flashes with each button (PlayStation colours)
-bool        g_tile_fx     = true; // v0.5: a glow in the wallpaper's colour sweeps across when moving between tiles
+bool        g_tile_fx     = true; // v0.5: glow behind the highlighted game + sparks when it moves
+int         g_tile_x = 110, g_tile_y = 200, g_tile_s = 250; // where that tile is drawn (1080p), set in the app
+long long   g_tile_preview_until = 0; // ms: show the glow strongly while the user lines it up
 bool        g_game_running = false;
 std::string g_game_title;
 std::string g_override;     // per-game clip playing instead of g_current ("" = main wallpaper)
@@ -426,7 +428,7 @@ void load_config() {
 	g_config_extra.clear();
 	static const char* const kKnown[] = {"enabled=", "video=", "dim=", "volume=", "blur=", "looks=", "shuffle=", "rotate=",
 	                                     "rotorder=", "mainvideo=", "gamevideos=", "gamepause=", "menuhide=", "storeonly=",
-	                                     "parallax=", "light=", "lightmode=", "lightfix=", "lightspeed=", "lightreact=", "tilefx="};
+	                                     "parallax=", "light=", "lightmode=", "lightfix=", "lightspeed=", "lightreact=", "tilefx=", "tilepos="};
 	while (pos < text.size()) {
 		const size_t      end  = text.find('\n', pos);
 		const std::string line = first_line(text.substr(pos, end == std::string::npos ? std::string::npos : end - pos));
@@ -474,6 +476,13 @@ void load_config() {
 			g_light_react = line.substr(11) != "0";
 		} else if (line.rfind("tilefx=", 0) == 0) {
 			g_tile_fx = line.substr(7) != "0";
+		} else if (line.rfind("tilepos=", 0) == 0) {
+			int x = 0, y = 0, sz = 0;
+			if (sscanf(line.c_str() + 8, "%d %d %d", &x, &y, &sz) == 3 && sz >= 40 && sz <= 700) {
+				g_tile_x = x;
+				g_tile_y = y;
+				g_tile_s = sz;
+			}
 		} else if (line.rfind("lightspeed=", 0) == 0) {
 			g_light_speed = std::max(0, std::min(2, atoi(line.c_str() + 11)));
 		}
@@ -506,7 +515,7 @@ void load_config() {
 std::string g_bak_settings; // what config.bak holds (without the video line)
 void save_config() {
 	const std::string text = g_config_extra + std::string("enabled=") + (g_enabled ? "1" : "0") + "\nvideo=" + g_current + "\ndim=" + std::to_string(g_dim) + "\nvolume=" + std::to_string(g_volume) + "\nblur=" + std::to_string(g_blur) + "\nlooks=" + looks_text() +
-	                            "\nshuffle=" + (g_shuffle ? "1" : "0") + "\nrotate=" + std::to_string(g_rotate) + "\nrotorder=" + (g_rot_order ? "order" : "random") + "\nmainvideo=" + (g_main_video ? "1" : "0") + "\ngamevideos=" + (g_game_videos ? "1" : "0") + "\ngamepause=" + (g_game_pause ? "1" : "0") + "\nmenuhide=" + (g_menu_hide ? "1" : "0") + "\nstoreonly=" + (g_store_only ? "1" : "0") + "\nparallax=" + (g_parallax ? "1" : "0") + "\nlight=" + (g_light ? "1" : "0") + "\nlightmode=" + g_light_mode + "\nlightfix=" + g_light_fix + "\nlightspeed=" + std::to_string(g_light_speed) + "\nlightreact=" + (g_light_react ? "1" : "0") + "\ntilefx=" + (g_tile_fx ? "1" : "0") + "\n";
+	                            "\nshuffle=" + (g_shuffle ? "1" : "0") + "\nrotate=" + std::to_string(g_rotate) + "\nrotorder=" + (g_rot_order ? "order" : "random") + "\nmainvideo=" + (g_main_video ? "1" : "0") + "\ngamevideos=" + (g_game_videos ? "1" : "0") + "\ngamepause=" + (g_game_pause ? "1" : "0") + "\nmenuhide=" + (g_menu_hide ? "1" : "0") + "\nstoreonly=" + (g_store_only ? "1" : "0") + "\nparallax=" + (g_parallax ? "1" : "0") + "\nlight=" + (g_light ? "1" : "0") + "\nlightmode=" + g_light_mode + "\nlightfix=" + g_light_fix + "\nlightspeed=" + std::to_string(g_light_speed) + "\nlightreact=" + (g_light_react ? "1" : "0") + "\ntilefx=" + (g_tile_fx ? "1" : "0") + "\ntilepos=" + std::to_string(g_tile_x) + " " + std::to_string(g_tile_y) + " " + std::to_string(g_tile_s) + "\n";
 	// v0.4: after a reboot both files were found empty (the data never reached the disk before the
 	// console went down; the rotation rewrites the config every few minutes). Write a temporary file,
 	// flush it, rename it over. config.bak is the safe copy: it is only rewritten when a SETTING
@@ -1473,6 +1482,9 @@ State get_state() {
 		st.light_speed = g_light_speed;
 		st.light_react = g_light_react;
 		st.tile_fx     = g_tile_fx;
+		st.tile_x      = g_tile_x;
+		st.tile_y      = g_tile_y;
+		st.tile_s      = g_tile_s;
 		st.game       = g_game_running ? g_game_title : std::string();
 	}
 	st.status = shellui_status();
@@ -1611,6 +1623,27 @@ void* rotate_thread(void*) {
 	return nullptr;
 }
 
+long long tile_clock_ms() {
+	timespec t {};
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	return static_cast<long long>(t.tv_sec) * 1000 + t.tv_nsec / 1000000;
+}
+
+// v0.5: where the highlighted game tile is drawn, for its glow and sparks. Shows a preview for 20 s.
+bool set_tile_pos(int x, int y, int size, bool save) {
+	if (size < 40 || size > 700 || x < -200 || x > 1920 || y < -200 || y > 1080) return false;
+	std::lock_guard<std::mutex> lock(g_ctl);
+	g_tile_x             = x;
+	g_tile_y             = y;
+	g_tile_s             = size;
+	g_tile_preview_until = save ? 0 : tile_clock_ms() + 20000;
+	if (save) {
+		save_config();
+		log("tile fx: position %d %d size %d", x, y, size);
+	}
+	return true;
+}
+
 bool set_option(const std::string& key, bool on, std::string& error) {
 	std::lock_guard<std::mutex> lock(g_ctl);
 	if (key == "shuffle") {
@@ -1741,6 +1774,7 @@ bool reset_settings(std::string& error) {
 	g_light_speed = 1;
 	g_light_react = true;
 	g_tile_fx     = true;
+	g_tile_x = 110, g_tile_y = 200, g_tile_s = 250;
 	write_text(kMenusFile, "1\n");
 	if (g_current.empty() || !exists(g_current.c_str())) {
 		const std::vector<Video> videos = list_videos();
@@ -2321,7 +2355,9 @@ void light_step() {
 			const std::string clip = g_store_only ? store_clip() : (!g_override.empty() ? g_override : g_current);
 			std::string       col  = clip.empty() || clip == "off" ? std::string() : clip_color(clip);
 			if (col.size() != 6) col = "22b8ff";
-			k = std::string("K ") + (g_light_react && g_light ? "1" : "0") + " " + (g_tile_fx ? "1" : "0") + " " + col;
+			k = std::string("K ") + (g_light_react && g_light ? "1" : "0") + " " + (g_tile_fx ? "1" : "0") + " " + col + " " +
+			    std::to_string(g_tile_x) + " " + std::to_string(g_tile_y) + " " + std::to_string(g_tile_s) + " " +
+			    (tile_clock_ms() < g_tile_preview_until ? "1" : "0");
 		}
 		static int         kbeat = 0;
 		if (k != last_k || ++kbeat >= 10) {

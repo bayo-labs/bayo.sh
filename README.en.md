@@ -36,8 +36,8 @@
 - **Discover**: a catalog of animated wallpapers with search and categories; **Download → Use** without leaving the app.
 - **WallpaperWaifu in Discover**: browse their wallpapers (categories, search, 1080p filter) and press their green download button; the PS5 saves it to your wallpapers.
 - **Weather effect**: when it rains, snows, gets foggy or stormy in your city, that effect shows on top of **your own wallpaper** (the wallpaper stays the same). Soft or Strong, with a button to try it.
-- **Glow between games**: as you move between games, a glow in your wallpaper's colour sweeps across the screen.
-- **Home screen widgets**: a glass card with time and date, your city's weather (or detected automatically), PS5 temperature, free space (the same number as Settings), controller battery and time played today with your last game. The data moves and changes colour, and the outline glows in Wave, Neon, Rainbow, Follow, Solid or Breathing mode.
+- **Glow and sparks**: a halo in your wallpaper's colour behind the selected game and sparks as you move between games (adjustable position).
+- **Home screen widgets**: a board of neon tiles with time and date, your city's weather (or detected automatically), PS5 temperature, free space (the same number as Settings), controller battery and time played today with your last game. The data moves and changes colour, and the outline glows in Wave, Neon, Rainbow, Follow, Solid or Breathing mode.
 - **QR for your phone**: scan it from the guide or the home tab and the app opens on your phone.
 - **Your own catalogs**: publish a `.json` with your wallpapers and anyone can add it with its link ([format](catalog/README.md)).
 - **Rotation**: change the wallpaper every 5, 15, 30 min or 1 h, shuffled or in order.

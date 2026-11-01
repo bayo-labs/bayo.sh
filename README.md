@@ -36,8 +36,8 @@
 - **Descubrir**: catálogo de fondos animados con buscador y categorías; **Descargar → Usar** sin salir de la app.
 - **WallpaperWaifu en Descubrir**: navega sus fondos (categorías, búsqueda, filtro 1080p) y dale a su botón verde de descarga; el PS5 lo guarda en tus fondos.
 - **Efecto del clima**: si llueve, nieva, hay niebla o tormenta en tu ciudad, ese efecto aparece encima de **tu propio fondo** (el fondo no cambia). Suave o Fuerte, con botón para probarlo.
-- **Destello entre juegos**: al moverte entre juegos, un brillo del color de tu fondo cruza la pantalla.
-- **Widgets en el inicio**: tarjeta de cristal con hora y fecha, clima de tu ciudad (o detectado solo), temperatura del PS5, espacio libre (el mismo número que Ajustes), batería del control y tiempo jugado hoy con tu último juego. Los datos se mueven y cambian de color, y el contorno brilla en modo Ola, Neón, Arcoíris, Sigue al fondo, Fijo o Respiración.
+- **Resplandor y chispas**: un halo del color de tu fondo detrás del juego elegido y chispas al moverte entre juegos (posición ajustable).
+- **Widgets en el inicio**: tablero de mosaicos neón con hora y fecha, clima de tu ciudad (o detectado solo), temperatura del PS5, espacio libre (el mismo número que Ajustes), batería del control y tiempo jugado hoy con tu último juego. Los datos se mueven y cambian de color, y el contorno brilla en modo Ola, Neón, Arcoíris, Sigue al fondo, Fijo o Respiración.
 - **QR para el celular**: escanéalo desde la guía o el inicio y se abre la app en tu teléfono.
 - **Catálogos propios**: publica un `.json` con tus fondos y cualquiera lo agrega con su enlace ([formato](catalog/README.md)).
 - **Rotación**: cambia de fondo cada 5, 15, 30 min o 1 h, aleatorio o en orden.

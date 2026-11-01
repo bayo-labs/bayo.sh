@@ -51,7 +51,8 @@ struct State {
 	std::string        light_fix  = "22b8ff"; // colour for fixed / breathe
 	int                light_speed = 1;        // 0 slow, 1 normal, 2 fast
 	bool               light_react = true;     // v0.5: flash with each button
-	bool               tile_fx     = true;     // v0.5: glow sweep when moving between tiles
+	bool               tile_fx     = true;     // v0.5: glow + sparks on the highlighted game
+	int                tile_x = 110, tile_y = 200, tile_s = 250; // where that tile is drawn
 	std::string        game;               // title id of the running game ("" = none)
 	std::string        current;  // real path of the chosen clip ("" = none)
 	std::string        status;   // ShellUI status line: playing / stopped / failed / starting
@@ -72,6 +73,7 @@ void set_volume(int percent); // 0..100
 void set_blur(int level);  // 0 off, 1 light, 2 strong
 void set_look(const std::string& key, int level); // "bottom", "top", "vignette", "haze"; 0..2
 bool set_option(const std::string& key, bool on, std::string& error); // "shuffle", "gamepause", "menuhide", "parallax"
+bool set_tile_pos(int x, int y, int size, bool save); // v0.5: highlighted tile spot; save=false previews 20 s
 bool delete_video(const std::string& path, std::string& error);
 // Light bar colour of a clip: <clip>.color next to it, "RRGGBB" (the page measures it).
 std::string clip_color(const std::string& path);

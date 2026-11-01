@@ -8,11 +8,17 @@
   - **Probar efecto**: míralo 45 s aunque no esté lloviendo.
 - **Luz con los botones**: el LED del DualSense destella con cada botón (△ verde, ○ rojo, ✕ azul,
   □ rosa) y regresa a su modo. Si el control no se puede leer, se apaga solo y queda en el registro.
-- **Destello entre juegos**: al moverte entre juegos, un brillo del color de tu fondo cruza la
-  pantalla hacia ese lado (usa la misma señal que el paralaje).
-- **Widgets nuevos**: **Hora** (con la zona horaria de tu ciudad, alterna con la fecha) y **Jugado**
-  (tiempo jugado hoy, alterna con tu último juego). La tarjeta pasa de 4 a 6 filas; cada una se
-  apaga por separado.
+- **Resplandor y chispas**: un halo del color de tu fondo detrás del juego elegido, que respira y
+  se enciende al moverte, y chispas que saltan del juego en cada movimiento. La posición se ajusta
+  en Efectos → **Ajustar posición** (flechas y tamaño, con vista previa en vivo en el inicio).
+- **Tablero de widgets**: la tarjeta pasa a ser un tablero de hasta 6 mosaicos neón (3 por fila),
+  cada uno con título, número grande, una línea chica y barra de 10 segmentos con un brillo que la
+  recorre. Mosaicos: **Hora** (con la zona horaria de tu ciudad), **Clima** (con el nombre de tu
+  colonia), **Consola**, **Disco**, **Control** y **Jugado hoy** (con tu último juego). El borde de
+  cada mosaico usa los mismos modos que antes (Ola, Neón, Arcoíris…), con el color viajando de uno
+  a otro. Cada mosaico se apaga por separado.
+- Los colores animados del menú ya no crean un objeto nuevo en cada cambio (caché de colores): la
+  memoria del menú no crece con el tiempo.
 - **Recortar**: Convertir y aplicar ahora deja elegir desde dónde y hasta dónde (vista previa en
   bucle). Botón **Recortar** en cada video compatible: guarda `<nombre>_recorte.mp4` y lo pone de
   fondo sin borrar el original.

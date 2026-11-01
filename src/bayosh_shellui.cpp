@@ -1779,6 +1779,30 @@ void* tint(float r, float g, float b, float a) {
 	return invoke(mono_class_get_method_from_name(g_color_class, ".ctor", 4), raw, args, "UIColor()") ? raw : nullptr;
 }
 
+// v0.5: tint() pins a new boxed UIColor on every call and never lets it go. Animated colours (the
+// widget outline at ~15 updates/s) made that grow without end. Colours are quantised (32 steps per
+// channel and alpha) and each one is built once; the setters copy the value, so sharing is fine.
+void* tint_q(float r, float g, float b, float a) {
+	struct Entry { uint32_t key; void* raw; };
+	static Entry cache[2048] = {};
+	static int   used        = 0;
+	auto q = [](float v) { v = v < 0 ? 0 : v > 1 ? 1 : v; return static_cast<uint32_t>(v * 31.0f + 0.5f); };
+	const uint32_t key = 0x80000000u | q(r) << 15 | q(g) << 10 | q(b) << 5 | q(a);
+	uint32_t       h   = (key * 2654435761u) >> 21; // 11 bits
+	for (int probe = 0; probe < 2048; ++probe, h = (h + 1) & 2047) {
+		if (cache[h].key == key) return cache[h].raw;
+		if (cache[h].key == 0) {
+			if (used >= 1800) break; // full: fall back to a fresh one (still correct)
+			void* raw = tint(q(r) / 31.0f, q(g) / 31.0f, q(b) / 31.0f, q(a) / 31.0f);
+			if (raw == nullptr) return nullptr;
+			cache[h] = {key, raw};
+			++used;
+			return raw;
+		}
+	}
+	return tint(r, g, b, a);
+}
+
 bool add_band(Look look, float x, float y, float w, float h, float weight) {
 	if (g_look_count[look] >= 40) {
 		return false;
@@ -1847,27 +1871,37 @@ void build_look(Look look) {
 }
 
 Obj fx_root(); // v0.5 weather layer (below)
+const char* type_of_getter(Obj klass, const char* prop_name); // blur section
 int px_transition(); // v0.5: BGLayerPlugin.TransitionType this frame (parallax section)
 extern int g_px_left, g_px_right;
 
-// ---- v0.4 widgets: a "cristal neón" card on the home screen ------------------------------------
-// Built like the looks (UI3 Panels under the dim panel, so it stays above the video and leaves with
-// it) plus PUI Labels for the text. The payload sends "W <on>\t<title>\t<value>..." (UDP 9053).
-constexpr int kWgRows = 6; // v0.5: time, weather, console, storage, controller, played
-constexpr int kWgEdges = 8; // 4 sides x (glow, core)
+// ---- v0.5 widgets: a "tablero" of neon mosaics on the home screen ------------------------------
+// Up to six tiles (3 per line) in a transparent container under the dim panel, so they stay above
+// the video and leave with it. Each tile: a soft glow, a neon rim (a panel 3 px larger peeking out
+// from behind) and dark glass with a title, a big value, a small line and a 10-segment bar. The
+// payload sends "W <on> <style> [colours]\t<RRGGBB|title|bar%>\t<value\x1fsmall line>..." (UDP 9053).
+constexpr int kWgRows = 6; // time, weather, console, storage, controller, played
+constexpr int kWgSegs = 10;
 Obj   g_wg_label_class = nullptr;
-Obj   g_wg_card        = nullptr;
-Obj   g_wg_halo        = nullptr;          // soft rounded glow behind the card
-Obj   g_wg_edge[kWgEdges] = {};            // neon outline (glow + core line per side)
-float g_wg_row_col[kWgRows][3] = {};
+Obj   g_wg_card        = nullptr; // container
+Obj   g_wg_glow[kWgRows] = {};
+Obj   g_wg_rim[kWgRows]  = {};
+Obj   g_wg_tile[kWgRows] = {};
 Obj   g_wg_title[kWgRows] = {};
 Obj   g_wg_value[kWgRows] = {};
-Obj   g_wg_dot[kWgRows]   = {};
+Obj   g_wg_sub[kWgRows]   = {};
+Obj   g_wg_seg[kWgRows][kWgSegs] = {};
+float g_wg_row_col[kWgRows][3] = {};
+int   g_wg_bar_shown[kWgRows] = {-2, -2, -2, -2, -2, -2};
+char  g_wg_main[kWgRows][64] = {};
+char  g_wg_small[kWgRows][100] = {};
+long  g_wg_val_t[kWgRows] = {};
 bool  g_wg_failed      = false;
 int   g_wg_shown_seq   = -1;
 int   g_wg_rows_built  = 0;
-const float kWgW = 600.0f, kWgX = 1920.0f - 64.0f - 600.0f, kWgRowH = 50.0f, kWgPad = 22.0f;
-const float kWgValueX0 = 230.0f; // value column (titles fit "Consola" / "Control" in 180 px)
+const float kTW = 250.0f, kTH = 150.0f, kTGap = 16.0f;
+const float kWgW = 3 * kTW + 2 * kTGap, kWgX = 1920.0f - 64.0f - kWgW;
+const float kWgValueX = 18.0f;
 const float kWgAccent[kWgRows][3] = {{0.13f, 0.72f, 1.0f}, {1.0f, 0.42f, 0.30f}, {0.66f, 0.33f, 0.97f}, {0.20f, 0.95f, 0.55f}, {1.0f, 0.60f, 0.24f}, {0.49f, 1.0f, 0.0f}};
 
 Obj wg_panel(Obj parent, float x, float y, float w, float h, void* color, const char* what) {
@@ -1884,8 +1918,9 @@ Obj wg_panel(Obj parent, float x, float y, float w, float h, void* color, const 
 		bool on = true;
 		property_set(g_dim_class, panel, "BackgroundVisibility", &on);
 	}
-	if (color != nullptr) {
-		property_set(g_dim_class, panel, g_dim_prop, color);
+	void* col = color != nullptr ? color : tint_q(0.0f, 0.0f, 0.0f, 0.0f);
+	if (col != nullptr) {
+		property_set(g_dim_class, panel, g_dim_prop, col);
 	}
 	void* child[1] = {panel};
 	invoke(find_method_up(g_ui3_widget, "AppendChild", 1), parent, child, "AppendChild(widget)");
@@ -1893,8 +1928,55 @@ Obj wg_panel(Obj parent, float x, float y, float w, float h, void* color, const 
 }
 
 void wg_round(Obj w, float radius) {
-	if (has_setter(g_ui3_widget, "BorderRadius")) {
+	if (w != nullptr && has_setter(g_ui3_widget, "BorderRadius")) {
 		property_set(g_ui3_widget, w, "BorderRadius", &radius);
+	}
+}
+
+// Text size. PUI's Label has no documented size setter, so look once for one that exists and is
+// safe: Label.FontSize / TextSize, or a Font *value type* with a Size (copied, changed, set back on
+// this label only; a shared Font object is never touched). Without one, the default size stays.
+int g_wg_font_mode = -1; // 0 none, 1 FontSize, 2 TextSize, 3 Font struct .Size
+void wg_font(Obj label, float size) {
+	if (label == nullptr) return;
+	if (g_wg_font_mode < 0) {
+		g_wg_font_mode = 0;
+		const char* how = "none";
+		if (has_setter(g_wg_label_class, "FontSize")) {
+			g_wg_font_mode = 1;
+			how            = "Label.FontSize";
+		} else if (has_setter(g_wg_label_class, "TextSize")) {
+			g_wg_font_mode = 2;
+			how            = "Label.TextSize";
+		} else if (has_setter(g_wg_label_class, "Font")) {
+			Obj font = property_get(g_wg_label_class, label, "Font");
+			Obj fk   = font != nullptr ? mono_object_get_class(font) : nullptr;
+			if (fk != nullptr && mono_class_is_valuetype != nullptr && mono_class_is_valuetype(fk) && has_setter(fk, "Size")) {
+				g_wg_font_mode = 3;
+				how            = "Font.Size (struct)";
+			}
+			if (fk != nullptr) log_properties(fk, "widgets Font");
+		}
+		wp_log("widgets: text size via %s", how);
+	}
+	auto set_num = [&](Obj klass, Obj obj, const char* prop) {
+		const char* t = type_of_getter(klass, prop);
+		if (t != nullptr && (strstr(t, "Int32") != nullptr || strcmp(t, "int") == 0)) {
+			int32_t v = static_cast<int32_t>(size);
+			property_set(klass, obj, prop, &v);
+		} else {
+			property_set(klass, obj, prop, &size);
+		}
+	};
+	if (g_wg_font_mode == 1) set_num(g_wg_label_class, label, "FontSize");
+	else if (g_wg_font_mode == 2) set_num(g_wg_label_class, label, "TextSize");
+	else if (g_wg_font_mode == 3) {
+		Obj font = property_get(g_wg_label_class, label, "Font");
+		if (font == nullptr) return;
+		Obj   fk  = mono_object_get_class(font);
+		void* raw = mono_object_unbox(font); // our own boxed copy
+		set_num(fk, static_cast<Obj>(raw), "Size");
+		property_set(g_wg_label_class, label, "Font", raw);
 	}
 }
 
@@ -1908,7 +1990,7 @@ Obj wg_label(Obj parent, float x, float y, float w, float h, float r, float g, f
 	property_set(g_ui3_widget, label, "Y", &y);
 	property_set(g_ui3_widget, label, "Width", &w);
 	property_set(g_ui3_widget, label, "Height", &h);
-	void* col = tint(r, g, b, 1.0f);
+	void* col = tint_q(r, g, b, 1.0f);
 	if (col != nullptr) {
 		property_set(g_wg_label_class, label, "TextColor", col);
 	}
@@ -1941,33 +2023,37 @@ bool wg_build() {
 		return false;
 	}
 	log_properties(g_wg_label_class, "widgets Label");
-	fx_root(); // weather layer first: the card is appended after it and stays on top
-	g_wg_halo = wg_panel(g_dim_panel, kWgX - 6.0f, 794.0f, kWgW + 12.0f, 212.0f, tint(0.13f, 0.72f, 1.0f, 0.16f), "widget halo");
-	if (g_wg_halo != nullptr) wg_round(g_wg_halo, 32.0f);
-	g_wg_card = wg_panel(g_dim_panel, kWgX, 800.0f, kWgW, 200.0f, tint(0.03f, 0.04f, 0.09f, 0.66f), "widget card");
+	fx_root(); // weather layer first: the tiles are appended after it and stay on top
+	g_wg_card = wg_panel(g_dim_panel, kWgX, 700.0f, kWgW, 2 * kTH + kTGap, nullptr, "widget board");
 	if (g_wg_card == nullptr) {
 		return false;
 	}
-	wg_round(g_wg_card, 26.0f);
-	// Neon outline: one glow strip + one core line per side, inset past the rounded corners.
-	// Sizes are set in wg_layout(); colors animate in wg_neon().
-	for (int i = 0; i < kWgEdges; ++i) {
-		g_wg_edge[i] = wg_panel(g_wg_card, 0.0f, 0.0f, 1.0f, 1.0f, nullptr, "widget edge");
-		if (g_wg_edge[i] != nullptr) wg_round(g_wg_edge[i], (i & 1) ? 1.0f : 4.0f);
+	// Siblings in drawing order: every glow, then every rim, then the glass tiles on top.
+	for (int i = 0; i < kWgRows; ++i) {
+		g_wg_glow[i] = wg_panel(g_wg_card, 0.0f, 0.0f, kTW + 16.0f, kTH + 16.0f, nullptr, "widget glow");
+		wg_round(g_wg_glow[i], 28.0f);
 	}
 	for (int i = 0; i < kWgRows; ++i) {
-		const float y = kWgPad + i * kWgRowH;
-		g_wg_dot[i]   = wg_panel(g_wg_card, 24.0f, y + 17.0f, 10.0f, 10.0f,
-		                         tint(kWgAccent[i][0], kWgAccent[i][1], kWgAccent[i][2], 1.0f), "widget dot");
-		if (g_wg_dot[i] != nullptr) wg_round(g_wg_dot[i], 5.0f);
-		g_wg_title[i] = wg_label(g_wg_card, 46.0f, y, 180.0f, 44.0f, kWgAccent[i][0], kWgAccent[i][1], kWgAccent[i][2]);
-		g_wg_value[i] = wg_label(g_wg_card, kWgValueX0, y, kWgW - kWgValueX0 - 20.0f, 44.0f, 0.95f, 0.96f, 1.0f);
+		g_wg_rim[i] = wg_panel(g_wg_card, 0.0f, 0.0f, kTW + 6.0f, kTH + 6.0f, nullptr, "widget rim");
+		wg_round(g_wg_rim[i], 21.0f);
 	}
-	Obj font = g_wg_value[0] != nullptr ? property_get(g_wg_label_class, g_wg_value[0], "Font") : nullptr;
-	if (font != nullptr && mono_object_get_class != nullptr) {
-		log_properties(mono_object_get_class(font), "widgets Font");
+	for (int i = 0; i < kWgRows; ++i) {
+		g_wg_tile[i] = wg_panel(g_wg_card, 0.0f, 0.0f, kTW, kTH, tint_q(0.03f, 0.04f, 0.11f, 0.80f), "widget tile");
+		if (g_wg_tile[i] == nullptr) return false;
+		wg_round(g_wg_tile[i], 18.0f);
+		g_wg_title[i] = wg_label(g_wg_tile[i], 18.0f, 10.0f, kTW - 30.0f, 30.0f, kWgAccent[i][0], kWgAccent[i][1], kWgAccent[i][2]);
+		g_wg_value[i] = wg_label(g_wg_tile[i], kWgValueX, 38.0f, kTW - 30.0f, 56.0f, 0.97f, 0.97f, 1.0f);
+		g_wg_sub[i]   = wg_label(g_wg_tile[i], 18.0f, 92.0f, kTW - 30.0f, 30.0f, 0.66f, 0.70f, 0.82f);
+		wg_font(g_wg_title[i], 21.0f);
+		wg_font(g_wg_value[i], 40.0f);
+		wg_font(g_wg_sub[i], 19.0f);
+		const float sw = (kTW - 36.0f - (kWgSegs - 1) * 3.0f) / kWgSegs;
+		for (int k = 0; k < kWgSegs; ++k) {
+			g_wg_seg[i][k] = wg_panel(g_wg_tile[i], 18.0f + k * (sw + 3.0f), 126.0f, sw, 10.0f, nullptr, "widget segment");
+			wg_round(g_wg_seg[i][k], 3.0f);
+		}
 	}
-	wp_log("widgets: card built");
+	wp_log("widgets: board built");
 	return true;
 }
 
@@ -1989,18 +2075,21 @@ void wg_rect(Obj w, float x, float y, float ww, float hh) {
 	property_set(g_ui3_widget, w, "Height", &hh);
 }
 
-// Outline geometry for a card of height h (edges are children of the card).
-void wg_layout(float h) {
-	const float r = 22.0f; // keep clear of the rounded corners
-	// top, bottom, left, right; even index = glow (6 px), odd = core (2 px)
-	wg_rect(g_wg_edge[0], r, -2.0f, kWgW - 2 * r, 6.0f);
-	wg_rect(g_wg_edge[1], r, 0.0f, kWgW - 2 * r, 2.0f);
-	wg_rect(g_wg_edge[2], r, h - 4.0f, kWgW - 2 * r, 6.0f);
-	wg_rect(g_wg_edge[3], r, h - 2.0f, kWgW - 2 * r, 2.0f);
-	wg_rect(g_wg_edge[4], -2.0f, r, 6.0f, h - 2 * r);
-	wg_rect(g_wg_edge[5], 0.0f, r, 2.0f, h - 2 * r);
-	wg_rect(g_wg_edge[6], kWgW - 4.0f, r, 6.0f, h - 2 * r);
-	wg_rect(g_wg_edge[7], kWgW - 2.0f, r, 2.0f, h - 2 * r);
+// Places the first n tiles 3 per line; returns the board's height.
+float wg_layout(int n) {
+	for (int i = 0; i < kWgRows; ++i) {
+		const bool  show = i < n;
+		const float x = (i % 3) * (kTW + kTGap), y = (i / 3) * (kTH + kTGap);
+		wg_visible(g_wg_glow[i], show);
+		wg_visible(g_wg_rim[i], show);
+		wg_visible(g_wg_tile[i], show);
+		if (!show) continue;
+		wg_rect(g_wg_glow[i], x - 8.0f, y - 8.0f, kTW + 16.0f, kTH + 16.0f);
+		wg_rect(g_wg_rim[i], x - 3.0f, y - 3.0f, kTW + 6.0f, kTH + 6.0f);
+		wg_rect(g_wg_tile[i], x, y, kTW, kTH);
+	}
+	const int lines = (n + 2) / 3;
+	return lines > 0 ? lines * kTH + (lines - 1) * kTGap : 0.0f;
 }
 
 // Outline styles (from the payload): wave | neon | rainbow | follow | fixed | breathe | off.
@@ -2069,37 +2158,32 @@ void wg_along(float p, float* c) {
 	for (int k = 0; k < 3; ++k) c[k] = g_wg_cols[i][k] + (g_wg_cols[j][k] - g_wg_cols[i][k]) * f;
 }
 
-// Animate the outline (called every few frames while the card is on).
+// Animate the rims and glows (called every few frames while the board is on). The colour travels
+// from tile to tile (wave / rainbow) so the board reads as one piece.
 void wg_neon() {
 	if (g_wg_card == nullptr) return;
 	const bool still = g_wg_style == kWgFixed || g_wg_style == kWgOff;
 	if (still && g_wg_static_done) return;
 	if (g_wg_t0 == 0) g_wg_t0 = now_ms();
 	const float t = (now_ms() - g_wg_t0) / 1000.0f;
-	// clockwise: top, right, bottom, left -> edge pairs 0/1, 6/7, 2/3, 4/5
-	static const float kPhase[kWgEdges] = {0.0f, 0.0f, 0.5f, 0.5f, 0.75f, 0.75f, 0.25f, 0.25f};
 	float pulse = 1.0f;
 	if (g_wg_style == kWgNeonS || g_wg_style == kWgFollow) pulse = 0.55f + 0.45f * (0.5f + 0.5f * sinf(t * 1.05f));
 	if (g_wg_style == kWgBreathe) pulse = 0.15f + 0.85f * (0.5f - 0.5f * cosf(t * 1.9f));
-	float halo[3] = {0, 0, 0};
-	for (int i = 0; i < kWgEdges; ++i) {
-		if (g_wg_edge[i] == nullptr) continue;
-		float c[3];
+	for (int i = 0; i < g_wg_rows_built && i < kWgRows; ++i) {
+		const float ph = (i % 3) / 6.0f + (i / 3) / 12.0f;
+		float       c[3];
 		switch (g_wg_style) {
-		case kWgWave: wg_along(t / (2.6f * (g_wg_ncols > 0 ? g_wg_ncols : 1)) + kPhase[i], c); break;
-		case kWgRainbow: wg_hsv(t / 8.0f + kPhase[i], c); break;
-		case kWgNeonS: wg_along(t / 18.0f, c); break;
+		case kWgWave: wg_along(t / (2.6f * (g_wg_ncols > 0 ? g_wg_ncols : 1)) + ph, c); break;
+		case kWgRainbow: wg_hsv(t / 8.0f + ph, c); break;
+		case kWgNeonS: wg_along(t / 18.0f + ph * 0.5f, c); break;
 		default: memcpy(c, g_wg_cols[0], sizeof(c)); break;
 		}
-		if (i == 0) memcpy(halo, c, sizeof(halo));
-		const bool  core  = (i & 1) != 0;
-		const float alpha = g_wg_style == kWgOff ? 0.0f : core ? 0.35f + 0.65f * pulse : 0.10f + 0.30f * pulse;
-		void*       col   = tint(c[0], c[1], c[2], alpha);
-		if (col != nullptr) property_set(g_dim_class, g_wg_edge[i], g_dim_prop, col);
-	}
-	if (g_wg_halo != nullptr) {
-		void* col = tint(halo[0], halo[1], halo[2], g_wg_style == kWgOff ? 0.0f : 0.05f + 0.11f * pulse);
-		if (col != nullptr) property_set(g_dim_class, g_wg_halo, g_dim_prop, col);
+		const float rim  = g_wg_style == kWgOff ? 0.10f : 0.40f + 0.60f * pulse;
+		const float glow = g_wg_style == kWgOff ? 0.0f : 0.06f + 0.20f * pulse;
+		void*       rc   = tint_q(c[0], c[1], c[2], rim);
+		void*       gc   = tint_q(c[0], c[1], c[2], glow);
+		if (rc != nullptr && g_wg_rim[i] != nullptr) property_set(g_dim_class, g_wg_rim[i], g_dim_prop, rc);
+		if (gc != nullptr && g_wg_glow[i] != nullptr) property_set(g_dim_class, g_wg_glow[i], g_dim_prop, gc);
 	}
 	g_wg_static_done = 1;
 }
@@ -2201,89 +2285,69 @@ void battery_poll() {
 	to_payload('B', msg, strlen(msg));
 }
 
-// ---- widget motion: values slide in, rows alternate (temp/sky <-> place...), dots pulse, card rises
-struct WgRowAnim {
-	char alt[3][100];
-	int  nalt   = 0;
-	int  cur    = 0;
-	long t_start = 0;
-	long t_next  = 0;
-	bool active  = false;
-};
-WgRowAnim g_wg_ra[kWgRows];
-long      g_wg_card_t  = 0;
-float     g_wg_card_y  = 0;
-bool      g_wg_card_on = false;
-const float kWgValueX  = kWgValueX0;
+// ---- widget motion: the board rises in, a value that changes slides in, filled segments shimmer ---
+long  g_wg_card_t  = 0;
+float g_wg_card_y  = 0;
+bool  g_wg_card_on = false;
 
 void wg_opacity(Obj w, float o) {
 	if (w != nullptr) property_set(g_ui3_widget, w, "Opacity", &o);
 }
 
-void wg_row_value(int i, const char* value) {
-	WgRowAnim& r = g_wg_ra[i];
-	char       a[3][100] = {};
-	int        n = 0;
-	const char* p = value;
-	while (n < 3) {
-		const char* sep = strchr(p, '\x1f');
-		const size_t len = sep != nullptr ? static_cast<size_t>(sep - p) : strlen(p);
-		snprintf(a[n++], sizeof(a[0]), "%.*s", static_cast<int>(len < 99 ? len : 99), p);
-		if (sep == nullptr) break;
-		p = sep + 1;
+// The 10-segment bar: filled ones in the row's colour, the rest a faint glass.
+void wg_bar(int i, int pct) {
+	if (pct == g_wg_bar_shown[i]) return;
+	g_wg_bar_shown[i] = pct;
+	const int   on  = pct < 0 ? 0 : (pct + 5) / 10;
+	const float* c  = g_wg_row_col[i];
+	for (int k = 0; k < kWgSegs; ++k) {
+		wg_visible(g_wg_seg[i][k], pct >= 0);
+		if (pct < 0) continue;
+		const float lift = 0.75f + 0.25f * k / (kWgSegs - 1.0f); // brighter towards the end
+		void* col = k < on ? tint_q(c[0] * lift, c[1] * lift, c[2] * lift, 1.0f) : tint_q(1.0f, 1.0f, 1.0f, 0.10f);
+		if (col != nullptr) property_set(g_dim_class, g_wg_seg[i][k], g_dim_prop, col);
 	}
-	if (n == r.nalt && memcmp(a, r.alt, sizeof(a)) == 0) return; // same data: keep the rhythm
-	const bool first_text_same = r.nalt > 0 && strcmp(a[0], r.alt[r.cur]) == 0;
-	memcpy(r.alt, a, sizeof(a));
-	r.nalt = n;
-	r.cur  = 0;
-	const long now = now_ms();
-	r.t_next = now + 7000 + i * 900; // stagger the rows
-	if (first_text_same) return;
-	wg_text(g_wg_value[i], r.alt[0]);
-	r.t_start = now;
-	r.active  = true;
 }
 
 void wg_anim() {
 	if (g_wg_card == nullptr || !g_wg_card_on) return;
 	const long now = now_ms();
 	auto ease = [](float p) { p = p < 0 ? 0 : p > 1 ? 1 : p; return 1.0f - (1.0f - p) * (1.0f - p) * (1.0f - p); };
-	if (g_wg_card_t != 0) { // the card rises into place
-		const float e = ease((now - g_wg_card_t) / 650.0f);
-		const float y = g_wg_card_y + 46.0f * (1.0f - e);
+	if (g_wg_card_t != 0) { // the board rises into place
+		const float e = ease((now - g_wg_card_t) / 700.0f);
+		const float y = g_wg_card_y + 60.0f * (1.0f - e);
 		property_set(g_ui3_widget, g_wg_card, "Y", const_cast<float*>(&y));
-		const float hy = y - 6.0f;
-		if (g_wg_halo != nullptr) property_set(g_ui3_widget, g_wg_halo, "Y", const_cast<float*>(&hy));
 		wg_opacity(g_wg_card, e);
-		wg_opacity(g_wg_halo, e);
 		if (e >= 1.0f) g_wg_card_t = 0;
 	}
-	for (int i = 0; i < kWgRows; ++i) {
-		WgRowAnim& r = g_wg_ra[i];
-		if (r.nalt == 0) continue;
-		if (r.nalt > 1 && now >= r.t_next) {
-			r.cur     = (r.cur + 1) % r.nalt;
-			r.t_next  = now + (r.cur == 0 ? 7000 : 4000);
-			r.t_start = now;
-			r.active  = true;
-			wg_text(g_wg_value[i], r.alt[r.cur]);
+	for (int i = 0; i < g_wg_rows_built && i < kWgRows; ++i) {
+		if (g_wg_val_t[i] == 0) continue;
+		const float e = ease((now - g_wg_val_t[i]) / 480.0f);
+		const float x = kWgValueX + 24.0f * (1.0f - e);
+		property_set(g_ui3_widget, g_wg_value[i], "X", const_cast<float*>(&x));
+		wg_opacity(g_wg_value[i], e);
+		if (e >= 1.0f) g_wg_val_t[i] = 0;
+	}
+	// a light runs along each filled bar every few seconds
+	const int pos = static_cast<int>((now / 90) % 60);
+	static int last_pos = -1;
+	if (pos != last_pos) {
+		last_pos = pos;
+		for (int i = 0; i < g_wg_rows_built && i < kWgRows; ++i) {
+			const int pct = g_wg_bar_shown[i];
+			if (pct < 0) continue;
+			const int on = (pct + 5) / 10;
+			for (int k = 0; k < on && k < kWgSegs; ++k) {
+				const float d = static_cast<float>(pos - k) - i;
+				wg_opacity(g_wg_seg[i][k], d >= 0 && d < 3 ? 0.55f + 0.15f * d : 1.0f);
+			}
 		}
-		if (r.active) {
-			const float e = ease((now - r.t_start) / 480.0f);
-			const float x = kWgValueX + 28.0f * (1.0f - e);
-			property_set(g_ui3_widget, g_wg_value[i], "X", const_cast<float*>(&x));
-			wg_opacity(g_wg_value[i], e);
-			if (e >= 1.0f) r.active = false;
-		}
-		// dots breathe one after another, like a slow wave down the card
-		wg_opacity(g_wg_dot[i], 0.45f + 0.55f * (0.5f + 0.5f * sinf(now / 520.0f - i * 0.9f)));
 	}
 }
 
 void widgets_tick() {
 	if (g_wg_text[0] == '1') {
-		// first read ~8 s after the card is on, then every ~30 s (tick = 15 frames)
+		// first read ~8 s after the board is on, then every ~30 s (tick = 15 frames)
 		if (g_bat_tick++ % 120 == 32) battery_poll();
 	}
 	const int seq = g_wg_seq.load();
@@ -2312,7 +2376,7 @@ void widgets_tick() {
 		snprintf(head, sizeof(head), "%.*s", static_cast<int>(hl < sizeof(head) ? hl : sizeof(head) - 1), text);
 		wg_parse_style(head);
 	}
-	// Fields after the head: "RRGGBB|title", value, ...
+	// Fields after the head: "RRGGBB|title|bar", "value\x1fsmall line", ...
 	const char* f[kWgRows * 2] = {};
 	int         nf = 0;
 	char*       p  = strchr(text, '\t');
@@ -2321,58 +2385,65 @@ void widgets_tick() {
 		f[nf++] = p + 1;
 		p       = strchr(p + 1, '\t');
 	}
-	const int rows = nf / 2;
-	for (int i = 0; i < kWgRows; ++i) {
-		const bool show = on && i < rows;
-		wg_visible(g_wg_dot[i], show);
-		wg_visible(g_wg_title[i], show);
-		wg_visible(g_wg_value[i], show);
-		if (!show) g_wg_ra[i].nalt = 0; // animate again when it comes back
-		if (show) {
-			const char* title = f[i * 2];
-			float       c[3]  = {kWgAccent[i][0], kWgAccent[i][1], kWgAccent[i][2]};
-			if (strlen(title) > 7 && title[6] == '|') {
-				wg_hex(title, c);
-				title += 7;
-			}
-			if (memcmp(c, g_wg_row_col[i], sizeof(c)) != 0) { // dynamic row colour (weather, heat, battery)
-				memcpy(g_wg_row_col[i], c, sizeof(c));
-				void* dc = tint(c[0], c[1], c[2], 1.0f);
-				if (dc != nullptr && g_wg_dot[i] != nullptr) property_set(g_dim_class, g_wg_dot[i], g_dim_prop, dc);
-				void* tc = tint(c[0], c[1], c[2], 1.0f);
-				if (tc != nullptr && g_wg_title[i] != nullptr) property_set(g_wg_label_class, g_wg_title[i], "TextColor", tc);
-			}
-			wg_text(g_wg_title[i], title);
-			wg_row_value(i, f[i * 2 + 1]);
+	const int rows = on ? nf / 2 : 0;
+	for (int i = 0; i < rows; ++i) {
+		char title[100];
+		snprintf(title, sizeof(title), "%s", f[i * 2]);
+		float c[3]  = {kWgAccent[i][0], kWgAccent[i][1], kWgAccent[i][2]};
+		char* t     = title;
+		int   bar   = -1;
+		if (strlen(t) > 7 && t[6] == '|') {
+			wg_hex(t, c);
+			t += 7;
 		}
+		if (char* bp = strchr(t, '|')) {
+			*bp = 0;
+			bar = atoi(bp + 1);
+			bar = bar < 0 ? 0 : bar > 100 ? 100 : bar;
+		}
+		if (memcmp(c, g_wg_row_col[i], sizeof(c)) != 0) { // dynamic colour (weather, heat, battery)
+			memcpy(g_wg_row_col[i], c, sizeof(c));
+			void* tc = tint_q(c[0], c[1], c[2], 1.0f);
+			if (tc != nullptr && g_wg_title[i] != nullptr) property_set(g_wg_label_class, g_wg_title[i], "TextColor", tc);
+			g_wg_bar_shown[i] = -2; // repaint the bar in the new colour
+		}
+		wg_text(g_wg_title[i], t);
+		char main[64] = {}, small[100] = {};
+		const char* v   = f[i * 2 + 1];
+		const char* sep = strchr(v, '\x1f');
+		snprintf(main, sizeof(main), "%.*s", static_cast<int>(sep != nullptr ? sep - v : strlen(v)), v);
+		if (sep != nullptr) snprintf(small, sizeof(small), "%s", sep + 1);
+		if (strcmp(main, g_wg_main[i]) != 0) {
+			snprintf(g_wg_main[i], sizeof(g_wg_main[i]), "%s", main);
+			wg_text(g_wg_value[i], main);
+			g_wg_val_t[i] = now_ms(); // slide in
+		}
+		if (strcmp(small, g_wg_small[i]) != 0) {
+			snprintf(g_wg_small[i], sizeof(g_wg_small[i]), "%s", small);
+			wg_text(g_wg_sub[i], small);
+		}
+		wg_bar(i, bar);
 	}
-	const float h = rows > 0 ? kWgPad * 2 + rows * kWgRowH - 6.0f : 0.0f;
+	for (int i = rows; i < kWgRows; ++i) g_wg_main[i][0] = 0; // animate again when it comes back
+	const float h = wg_layout(rows);
 	const float y = 1080.0f - 70.0f - h;
 	property_set(g_ui3_widget, g_wg_card, "Height", const_cast<float*>(&h));
 	g_wg_card_y = y;
-	const bool visible = on && rows > 0;
+	const bool visible = rows > 0;
 	if (visible && !g_wg_card_on) {
 		g_wg_card_t = now_ms(); // entrance
-		const float y0 = y + 46.0f;
+		const float y0 = y + 60.0f;
 		property_set(g_ui3_widget, g_wg_card, "Y", const_cast<float*>(&y0));
 		wg_opacity(g_wg_card, 0.0f);
-		wg_opacity(g_wg_halo, 0.0f);
 	} else if (g_wg_card_t == 0) {
 		property_set(g_ui3_widget, g_wg_card, "Y", const_cast<float*>(&y));
 	}
 	g_wg_card_on = visible;
-	wg_layout(h);
-	if (g_wg_card_t == 0) wg_rect(g_wg_halo, kWgX - 6.0f, y - 6.0f, kWgW + 12.0f, h + 12.0f);
-	else {
-		const float hw = kWgW + 12.0f, hh = h + 12.0f;
-		property_set(g_ui3_widget, g_wg_halo, "Width", const_cast<float*>(&hw));
-		property_set(g_ui3_widget, g_wg_halo, "Height", const_cast<float*>(&hh));
-	}
-	wg_visible(g_wg_halo, on && rows > 0);
-	wg_visible(g_wg_card, on && rows > 0);
+	wg_visible(g_wg_card, visible);
 	if (rows != g_wg_rows_built) {
-		g_wg_rows_built = rows;
-		wp_log("widgets: %d row(s), %s", rows, on ? "on" : "off");
+		g_wg_rows_built  = rows;
+		g_wg_static_done = 0; // paint the rims of the new tiles
+		wp_log("widgets: %d tile(s), %s", rows, on ? "on" : "off");
 	}
 }
 
@@ -2607,71 +2678,145 @@ void fx_tick() {
 	}
 }
 
-// ---- v0.5 tile effect: a glow in the wallpaper's colour sweeps across when you move between games --
-// ShellUI does not tell the background where each tile is drawn, but it does say when the highlight
-// slides left or right (BGLayerPlugin.TransitionType, the same signal as the parallax). A soft vertical
-// band of light crosses the screen that way, under the widget card. Colours are built once per
-// wallpaper colour (tint() pins a new object every call).
-constexpr int kSwBands = 9;
-Obj      g_sw[kSwBands] = {};
-uint32_t g_sw_rgb = 0xffffffffu;
-long     g_sw_t = 0;
-int      g_sw_dir = 0, g_sw_last_type = -1;
-bool     g_sw_failed = false;
+// ---- v0.5 tile effects: a glow behind the highlighted game and sparks when the highlight moves ---
+// ShellUI does not tell the background where it draws the highlighted tile, so the spot comes from
+// the app ("K ... x y size": the user lines it up once in Efectos → Ajustar posición, with a live
+// preview). A move is seen two ways: the highlighted tile's art changes (SetBackground hook) or the
+// home screen slides (BGLayerPlugin.TransitionType). Both layers live in the weather layer, under the
+// widget board. Colours come from tint_q (built once).
+constexpr int kHaloRings = 7;
+constexpr int kSparks    = 18;
+Obj   g_halo[kHaloRings] = {};
+Obj   g_spark[kSparks]   = {};
+float g_sp_x[kSparks], g_sp_y[kSparks], g_sp_vx[kSparks], g_sp_vy[kSparks];
+long  g_sp_t0 = 0, g_halo_kick = 0, g_tfx_preview_fire = 0;
+int   g_tfx_seen_moves = -1, g_tfx_last_type = -1;
+bool  g_tfx_failed = false, g_tfx_built = false, g_tfx_shown = false;
+std::atomic<int> g_tile_x {110}, g_tile_y {200}, g_tile_s {250}; // from "K" (1080p coordinates)
+std::atomic<bool> g_tile_preview {false};
+std::atomic<int>  g_focus_moves {0}; // bumped by SetBg_Hook
 
-void sweep_tick() {
-	if (!g_tilefx.load() || g_sw_failed || !video_active()) {
-		if (g_sw_t != 0) {
-			for (Obj b : g_sw) wg_visible(b, false);
-			g_sw_t = 0;
-		}
+bool tfx_build() {
+	g_tfx_built = true;
+	if (fx_root() == nullptr) return false;
+	for (int i = 0; i < kHaloRings; ++i) {
+		g_halo[i] = fx_panel(-500.0f, 0.0f, 10.0f, 10.0f);
+		if (g_halo[i] == nullptr) return false;
+	}
+	for (int i = 0; i < kSparks; ++i) {
+		g_spark[i] = fx_panel(-500.0f, 0.0f, 6.0f, 6.0f);
+		if (g_spark[i] == nullptr) return false;
+		wg_visible(g_spark[i], false);
+	}
+	wp_log("tile fx: glow + sparks ready");
+	return true;
+}
+
+void tfx_hide() {
+	if (!g_tfx_shown) return;
+	g_tfx_shown = false;
+	for (Obj o : g_halo) wg_visible(o, false);
+	for (Obj o : g_spark) wg_visible(o, false);
+	g_sp_t0 = 0;
+}
+
+void tfx_fire(float cx, float cy, float half, uint32_t rgb) {
+	const float r = ((rgb >> 16) & 255) / 255.0f, g = ((rgb >> 8) & 255) / 255.0f, b = (rgb & 255) / 255.0f;
+	for (int i = 0; i < kSparks; ++i) {
+		const float a  = fx_rand() * 6.2832f;
+		const float sp = 260.0f + fx_rand() * 420.0f;
+		g_sp_x[i]      = cx + cosf(a) * half * 0.85f;
+		g_sp_y[i]      = cy + sinf(a) * half * 0.85f;
+		g_sp_vx[i]     = cosf(a) * sp;
+		g_sp_vy[i]     = sinf(a) * sp - 120.0f;
+		const float w  = fx_rand(); // some white-hot, most in the wallpaper's colour
+		const float sz = 4.0f + fx_rand() * 6.0f;
+		void* col = tint_q(r + (1 - r) * w * 0.8f, g + (1 - g) * w * 0.8f, b + (1 - b) * w * 0.8f, 1.0f);
+		if (col != nullptr) property_set(g_dim_class, g_spark[i], g_dim_prop, col);
+		wg_rect(g_spark[i], g_sp_x[i], g_sp_y[i], sz, sz);
+		wg_round(g_spark[i], sz * 0.5f);
+		wg_opacity(g_spark[i], 1.0f);
+		wg_visible(g_spark[i], true);
+	}
+	g_sp_t0     = now_ms();
+	g_halo_kick = g_sp_t0;
+}
+
+void tile_fx_tick() {
+	const bool preview = g_tile_preview.load();
+	if ((!g_tilefx.load() && !preview) || g_tfx_failed || !video_active()) {
+		tfx_hide();
 		return;
 	}
-	const int type = px_transition();
-	if (type != g_sw_last_type) {
-		g_sw_last_type = type;
-		if (type >= 0 && (type == g_px_left || type == g_px_right)) {
-			g_sw_dir = type == g_px_left ? 1 : -1;
-			g_sw_t   = now_ms();
+	if (!g_tfx_built && !tfx_build()) {
+		g_tfx_failed = true;
+		return;
+	}
+	const float    s  = static_cast<float>(g_tile_s.load());
+	const float    x0 = static_cast<float>(g_tile_x.load()), y0 = static_cast<float>(g_tile_y.load());
+	const float    cx = x0 + s * 0.5f, cy = y0 + s * 0.5f;
+	const uint32_t rgb = g_wall_rgb.load();
+	const long     now = now_ms();
+	static float last_geo[3] = {-1, -1, -1};
+	if (!g_tfx_shown || last_geo[0] != x0 || last_geo[1] != y0 || last_geo[2] != s) { // place the rings
+		g_tfx_shown = true;
+		last_geo[0] = x0;
+		last_geo[1] = y0;
+		last_geo[2] = s;
+		for (int i = 0; i < kHaloRings; ++i) {
+			const float pad = 6.0f + i * 9.0f;
+			wg_rect(g_halo[i], x0 - pad, y0 - pad, s + 2 * pad, s + 2 * pad);
+			wg_round(g_halo[i], 24.0f + pad);
+			wg_visible(g_halo[i], true);
 		}
 	}
-	if (g_sw_t == 0) return;
-	if (g_sw[0] == nullptr) {
-		if (fx_root() == nullptr) {
-			g_sw_failed = true;
-			return;
+	// a move: the tile's art changed or the home screen slid
+	const int moves = g_focus_moves.load();
+	const int type  = px_transition();
+	bool      moved = false;
+	if (moves != g_tfx_seen_moves) {
+		moved            = g_tfx_seen_moves >= 0;
+		g_tfx_seen_moves = moves;
+	}
+	if (type != g_tfx_last_type) {
+		moved           = moved || (type >= 0 && (type == g_px_left || type == g_px_right));
+		g_tfx_last_type = type;
+	}
+	if (preview && now - g_tfx_preview_fire > 1600) { // while lining it up: sparks every 1.6 s
+		g_tfx_preview_fire = now;
+		moved              = true;
+	}
+	if (moved && g_spark[0] != nullptr) tfx_fire(cx, cy, s * 0.5f, rgb);
+	// glow: breathes slowly, flares on a move (every other frame is plenty)
+	if (g_tick % 2 == 0) {
+		const float breathe = 0.75f + 0.25f * sinf(now / 900.0f);
+		const float kick    = g_halo_kick != 0 && now - g_halo_kick < 700 ? 1.0f - (now - g_halo_kick) / 700.0f : 0.0f;
+		const float r = ((rgb >> 16) & 255) / 255.0f, g = ((rgb >> 8) & 255) / 255.0f, b = (rgb & 255) / 255.0f;
+		for (int i = 0; i < kHaloRings; ++i) {
+			const float fall = 1.0f - static_cast<float>(i) / kHaloRings; // strongest close to the tile
+			const float a    = (preview ? 0.16f : 0.07f + 0.05f * breathe + 0.10f * kick) * fall;
+			void*       col  = tint_q(r, g, b, a);
+			if (col != nullptr) property_set(g_dim_class, g_halo[i], g_dim_prop, col);
 		}
-		for (int i = 0; i < kSwBands; ++i) {
-			g_sw[i] = fx_panel(-400.0f, 0.0f, 38.0f, 1080.0f);
-			if (g_sw[i] == nullptr) {
-				g_sw_failed = true;
-				return;
+	}
+	// sparks fly out, fall a little and fade
+	if (g_sp_t0 != 0) {
+		const float e = (now - g_sp_t0) / 1000.0f;
+		if (e >= 0.8f) {
+			for (Obj o : g_spark) wg_visible(o, false);
+			g_sp_t0 = 0;
+		} else {
+			const float dt = 1.0f / 30.0f;
+			for (int i = 0; i < kSparks; ++i) {
+				g_sp_vy[i] += 520.0f * dt;
+				g_sp_vx[i] *= 0.96f;
+				g_sp_x[i] += g_sp_vx[i] * dt;
+				g_sp_y[i] += g_sp_vy[i] * dt;
+				property_set(g_ui3_widget, g_spark[i], "X", &g_sp_x[i]);
+				property_set(g_ui3_widget, g_spark[i], "Y", &g_sp_y[i]);
+				wg_opacity(g_spark[i], 1.0f - e / 0.8f);
 			}
 		}
-		wp_log("tile fx: sweep ready");
-	}
-	const uint32_t rgb = g_wall_rgb.load();
-	if (rgb != g_sw_rgb) {
-		g_sw_rgb = rgb;
-		for (int i = 0; i < kSwBands; ++i) {
-			const float d = (i - (kSwBands - 1) * 0.5f) / ((kSwBands - 1) * 0.5f); // -1..1
-			const float a = 0.20f * (1.0f - d * d);                                   // bell
-			void* c = tint(((rgb >> 16) & 255) / 255.0f, ((rgb >> 8) & 255) / 255.0f, (rgb & 255) / 255.0f, a);
-			if (c != nullptr) property_set(g_dim_class, g_sw[i], g_dim_prop, c);
-		}
-	}
-	const float e = (now_ms() - g_sw_t) / 520.0f;
-	if (e >= 1.0f) {
-		for (Obj b : g_sw) wg_visible(b, false);
-		g_sw_t = 0;
-		return;
-	}
-	const float k  = 1.0f - (1.0f - e) * (1.0f - e); // ease out
-	const float cx = g_sw_dir > 0 ? -250.0f + k * 2420.0f : 2170.0f - k * 2420.0f;
-	for (int i = 0; i < kSwBands; ++i) {
-		float x = cx + (i - kSwBands / 2) * 36.0f;
-		wg_visible(g_sw[i], true);
-		property_set(g_ui3_widget, g_sw[i], "X", &x);
 	}
 }
 
@@ -3738,6 +3883,11 @@ uint64_t SetBg_Hook(Obj self, Obj param) {
 		// non-game tiles use bg_hub_default. Tell the payload which game is highlighted.
 		const char* img = prop_text(param, "NextImageUri");
 		if (img != nullptr && img[0] != 0) {
+			static char last_img[160] = "";
+			if (strncmp(img, last_img, sizeof(last_img) - 1) != 0) { // v0.5 tile fx: the highlight moved
+				snprintf(last_img, sizeof(last_img), "%s", img);
+				++g_focus_moves;
+			}
 			std::string tid;
 			for (const char* key : {"/user/appmeta/", "/user/app/"}) {
 				const char* p = strstr(img, key);
@@ -4203,12 +4353,12 @@ void Update_Hook(Obj self) {
 			widgets_tick();
 		}
 		if (g_tick % 2 == 0) {
-			fx_tick(); // weather effect, ~30 updates/s while it is on
+			fx_tick();      // weather effect, ~30 updates/s while it is on
+			tile_fx_tick(); // glow + sparks on the highlighted game
 		}
 		if (true) { // every frame: the menu fade needs it (just a static field read)
 			focus_tick();
 			parallax_tick();
-			sweep_tick();
 		}
 	}
 
@@ -4413,9 +4563,15 @@ void* cmd_udp_thread(void*) {
 				++g_wg_seq;
 			}
 		} else if (buf[0] == 'K' && buf[1] == ' ') {
-			int      r = 0, t = 0;
+			int      r = 0, t = 0, tx = -1, ty = -1, ts = -1, pv = 0;
 			char     hex[8] = {};
-			if (sscanf(buf + 2, "%d %d %7s", &r, &t, hex) >= 2) {
+			if (sscanf(buf + 2, "%d %d %7s %d %d %d %d", &r, &t, hex, &tx, &ty, &ts, &pv) >= 2) {
+				if (ts >= 40 && ts <= 700 && tx >= -200 && tx <= 1920 && ty >= -200 && ty <= 1080) {
+					g_tile_x = tx;
+					g_tile_y = ty;
+					g_tile_s = ts;
+				}
+				g_tile_preview = pv != 0;
 				if (g_react.load() != (r != 0) || g_tilefx.load() != (t != 0)) wp_log("command: K react %d tilefx %d", r, t);
 				g_react  = r != 0;
 				g_tilefx = t != 0;
