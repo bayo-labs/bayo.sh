@@ -3257,55 +3257,127 @@ void xfade_tick() {
 	}
 }
 
-// v0.3.2: "Cerrar" closes the bayo.sh window for real: ShellAppManager.GetLastShellApp() is the app
-// that was just in front (ours, since the user pressed Cerrar in it); ExitApp() only if its TitleId
-// is BYSH00001, so another app is never touched.
-void exit_our_app() {
-	Obj mgr = find_class("Sce.Vsh.ShellUI.AppSystem", "ShellAppManager");
-	Obj get = mgr != nullptr ? mono_class_get_method_from_name(mgr, "GetLastShellApp", 0) : nullptr;
-	if (get == nullptr) {
-		wp_log("exitapp: ShellAppManager.GetLastShellApp not found");
-		return;
+// "Cerrar" closes the bayo.sh window for real. v0.3.2 asked ShellAppManager.GetLastShellApp(), but on
+// the console that was not our window (the list it reads was empty). v0.5 looks through every app
+// ShellAppManager can hand out (single getters and lists) and calls ExitApp() only on the one whose
+// TitleId is BYSH00001, so another app is never touched. The manager's method names go to the log
+// once, so a firmware that names them differently can be matched next time.
+bool app_title(Obj app, char* tid, size_t n) {
+	tid[0] = 0;
+	if (app == nullptr) return false;
+	Obj klass = mono_object_get_class(app);
+	Obj tid_m = klass != nullptr ? find_method_up(klass, "get_TitleId", 0) : nullptr;
+	if (tid_m == nullptr) return false;
+	Obj exc = nullptr;
+	Obj str = mono_runtime_invoke(tid_m, app, nullptr, &exc);
+	if (str == nullptr || exc != nullptr) return true; // an app, title unknown
+	char* u = mono_string_to_utf8(static_cast<char*>(str));
+	snprintf(tid, n, "%s", u != nullptr ? u : "");
+	return true;
+}
+
+bool exit_if_ours(Obj app, const char* via) {
+	char tid[64];
+	if (!app_title(app, tid, sizeof(tid))) return false;
+	if (strcmp(tid, "BYSH00001") != 0) {
+		wp_log("exitapp: %s -> %s (not ours)", via, tid[0] ? tid : "?");
+		return false;
+	}
+	Obj ex_m = find_method_up(mono_object_get_class(app), "ExitApp", 0);
+	if (ex_m == nullptr) {
+		wp_log("exitapp: %s -> ours, but no ExitApp()", via);
+		return false;
 	}
 	Obj exc = nullptr;
-	Obj app = mono_runtime_invoke(get, nullptr, nullptr, &exc);
-	if (exc != nullptr || app == nullptr) {
-		wp_log("exitapp: no last app (exception %p)", exc);
-		return;
-	}
-	Obj klass = mono_object_get_class(app);
-	Obj tid_m = find_method_up(klass, "get_TitleId", 0);
-	Obj name_m = find_method_up(klass, "get_Name", 0);
-	char tid[64] = "?", name[96] = "?";
-	if (tid_m != nullptr) {
-		exc = nullptr;
-		Obj s = mono_runtime_invoke(tid_m, app, nullptr, &exc);
-		if (s != nullptr && exc == nullptr) {
-			char* u = mono_string_to_utf8(s);
-			snprintf(tid, sizeof(tid), "%s", u ? u : "");
-		}
-	}
-	if (name_m != nullptr) {
-		exc = nullptr;
-		Obj s = mono_runtime_invoke(name_m, app, nullptr, &exc);
-		if (s != nullptr && exc == nullptr) {
-			char* u = mono_string_to_utf8(s);
-			snprintf(name, sizeof(name), "%s", u ? u : "");
-		}
-	}
-	wp_log("exitapp: last app %s '%s' (%s)", tid, name, klass ? mono_class_get_name(klass) : "?");
-	if (strcmp(tid, "BYSH00001") != 0) {
-		wp_log("exitapp: not our window, left alone");
-		return;
-	}
-	Obj ex_m = find_method_up(klass, "ExitApp", 0);
-	if (ex_m == nullptr) {
-		wp_log("exitapp: ExitApp() not found");
-		return;
-	}
-	exc = nullptr;
 	mono_runtime_invoke(ex_m, app, nullptr, &exc);
-	wp_log("exitapp: ExitApp() %s", exc == nullptr ? "done" : "threw");
+	wp_log("exitapp: %s -> ExitApp() %s", via, exc == nullptr ? "done" : "threw");
+	return exc == nullptr;
+}
+
+// A value from a getter: one app, an array of apps or a list (Count / get_Item).
+bool exit_in_value(Obj v, const char* via) {
+	if (v == nullptr) return false;
+	if (exit_if_ours(v, via)) return true;
+	Obj         klass = mono_object_get_class(v);
+	const char* cn    = klass != nullptr ? mono_class_get_name(klass) : nullptr;
+	if (cn == nullptr) return false;
+	Obj count_m = find_method_up(klass, "get_Count", 0), item_m = find_method_up(klass, "get_Item", 1);
+	Obj len_m   = find_method_up(klass, "get_Length", 0);
+	Obj getv_m  = nullptr;
+	if (count_m == nullptr && len_m != nullptr && strchr(cn, '[') != nullptr) {
+		Obj d  = mono_method_desc_new("System.Array:GetValue(int)", 1);
+		Obj ac = mono_class_from_name(mono_get_corlib(), "System", "Array");
+		getv_m = d != nullptr && ac != nullptr ? mono_method_desc_search_in_class(d, ac) : nullptr;
+		if (d != nullptr) mono_method_desc_free(d);
+	}
+	Obj cm = count_m != nullptr && item_m != nullptr ? count_m : getv_m != nullptr ? len_m : nullptr;
+	Obj im = count_m != nullptr && item_m != nullptr ? item_m : getv_m;
+	if (cm == nullptr || im == nullptr) return false;
+	Obj exc = nullptr;
+	Obj nb  = mono_runtime_invoke(cm, v, nullptr, &exc);
+	const int n = nb != nullptr && exc == nullptr ? *static_cast<int32_t*>(mono_object_unbox(nb)) : 0;
+	wp_log("exitapp: %s is %s with %d", via, cn, n);
+	for (int32_t i = 0; i < n && i < 32; ++i) {
+		void* args[1] = {&i};
+		exc           = nullptr;
+		Obj e         = mono_runtime_invoke(im, v, args, &exc);
+		if (exc == nullptr && exit_if_ours(e, via)) return true;
+	}
+	return false;
+}
+
+void exit_our_app() {
+	Obj mgr = find_class("Sce.Vsh.ShellUI.AppSystem", "ShellAppManager");
+	if (mgr == nullptr) {
+		wp_log("exitapp: ShellAppManager not found");
+		return;
+	}
+	static bool listed = false;
+	if (!listed && mono_class_get_methods != nullptr) { // once: what this firmware offers
+		listed = true;
+		char   line[1200];
+		size_t n    = 0;
+		void*  iter = nullptr;
+		while (Obj m = mono_class_get_methods(mgr, &iter)) {
+			const char* mn = mono_method_get_name(m);
+			if (mn == nullptr || !name_has(mn, {"App", "Shell", "Get", "Exit", "Close"})) continue;
+			const int w = snprintf(line + n, sizeof(line) - n, "%s ", mn);
+			if (w < 0 || n + static_cast<size_t>(w) >= sizeof(line)) break;
+			n += static_cast<size_t>(w);
+		}
+		line[n] = 0;
+		wp_log("exitapp: ShellAppManager has %s", line);
+	}
+	// Static getters first (GetLastShellApp was static in v0.3.2), then the same names on Instance.
+	static const char* const kGetters[] = {"GetLastShellApp", "GetActiveShellApp", "GetForegroundShellApp", "GetFocusedShellApp",
+	                                       "GetCurrentShellApp", "GetTopShellApp", "GetShellApps", "GetShellAppList",
+	                                       "GetAllShellApps", "get_ShellApps", "get_AppList", "get_Apps", "GetApps"};
+	Obj inst = nullptr;
+	{
+		Obj prop = mono_class_get_property_from_name(mgr, "Instance");
+		Obj get  = prop != nullptr ? mono_property_get_get_method(prop) : nullptr;
+		Obj exc  = nullptr;
+		inst     = get != nullptr ? mono_runtime_invoke(get, nullptr, nullptr, &exc) : nullptr;
+		if (exc != nullptr) inst = nullptr;
+	}
+	for (const char* g : kGetters) {
+		Obj m = mono_class_get_method_from_name(mgr, g, 0);
+		if (m == nullptr) continue;
+		// Static methods ignore the target; instance ones get the singleton (null only if there is none,
+		// as v0.3.2 called GetLastShellApp).
+		Obj exc = nullptr;
+		Obj v   = mono_runtime_invoke(m, inst, nullptr, &exc);
+		if (exc != nullptr) {
+			wp_log("exitapp: %s threw", g);
+			continue;
+		}
+		if (v == nullptr) {
+			wp_log("exitapp: %s -> null", g);
+			continue;
+		}
+		if (exit_in_value(v, g)) return;
+	}
+	wp_log("exitapp: our window was not found; going home instead");
 }
 
 void focus_tick() {
