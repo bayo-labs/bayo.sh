@@ -126,6 +126,8 @@ std::string g_light_now  = "off"; // last value written to kLightFile
 std::string g_light_mode = "follow"; // follow | fixed | rainbow | breathe | wave
 std::string g_light_fix  = "22b8ff";
 int         g_light_speed = 1;
+bool        g_light_react = true; // v0.5: the light bar flashes with each button (PlayStation colours)
+bool        g_tile_fx     = true; // v0.5: glow in the wallpaper's colour behind the highlighted tile
 bool        g_game_running = false;
 std::string g_game_title;
 std::string g_override;     // per-game clip playing instead of g_current ("" = main wallpaper)
@@ -424,7 +426,7 @@ void load_config() {
 	g_config_extra.clear();
 	static const char* const kKnown[] = {"enabled=", "video=", "dim=", "volume=", "blur=", "looks=", "shuffle=", "rotate=",
 	                                     "rotorder=", "mainvideo=", "gamevideos=", "gamepause=", "menuhide=", "storeonly=",
-	                                     "parallax=", "light=", "lightmode=", "lightfix=", "lightspeed="};
+	                                     "parallax=", "light=", "lightmode=", "lightfix=", "lightspeed=", "lightreact=", "tilefx="};
 	while (pos < text.size()) {
 		const size_t      end  = text.find('\n', pos);
 		const std::string line = first_line(text.substr(pos, end == std::string::npos ? std::string::npos : end - pos));
@@ -468,6 +470,10 @@ void load_config() {
 			g_light_mode = line.substr(10);
 		} else if (line.rfind("lightfix=", 0) == 0) {
 			g_light_fix = line.substr(9);
+		} else if (line.rfind("lightreact=", 0) == 0) {
+			g_light_react = line.substr(11) != "0";
+		} else if (line.rfind("tilefx=", 0) == 0) {
+			g_tile_fx = line.substr(7) != "0";
 		} else if (line.rfind("lightspeed=", 0) == 0) {
 			g_light_speed = std::max(0, std::min(2, atoi(line.c_str() + 11)));
 		}
@@ -500,7 +506,7 @@ void load_config() {
 std::string g_bak_settings; // what config.bak holds (without the video line)
 void save_config() {
 	const std::string text = g_config_extra + std::string("enabled=") + (g_enabled ? "1" : "0") + "\nvideo=" + g_current + "\ndim=" + std::to_string(g_dim) + "\nvolume=" + std::to_string(g_volume) + "\nblur=" + std::to_string(g_blur) + "\nlooks=" + looks_text() +
-	                            "\nshuffle=" + (g_shuffle ? "1" : "0") + "\nrotate=" + std::to_string(g_rotate) + "\nrotorder=" + (g_rot_order ? "order" : "random") + "\nmainvideo=" + (g_main_video ? "1" : "0") + "\ngamevideos=" + (g_game_videos ? "1" : "0") + "\ngamepause=" + (g_game_pause ? "1" : "0") + "\nmenuhide=" + (g_menu_hide ? "1" : "0") + "\nstoreonly=" + (g_store_only ? "1" : "0") + "\nparallax=" + (g_parallax ? "1" : "0") + "\nlight=" + (g_light ? "1" : "0") + "\nlightmode=" + g_light_mode + "\nlightfix=" + g_light_fix + "\nlightspeed=" + std::to_string(g_light_speed) + "\n";
+	                            "\nshuffle=" + (g_shuffle ? "1" : "0") + "\nrotate=" + std::to_string(g_rotate) + "\nrotorder=" + (g_rot_order ? "order" : "random") + "\nmainvideo=" + (g_main_video ? "1" : "0") + "\ngamevideos=" + (g_game_videos ? "1" : "0") + "\ngamepause=" + (g_game_pause ? "1" : "0") + "\nmenuhide=" + (g_menu_hide ? "1" : "0") + "\nstoreonly=" + (g_store_only ? "1" : "0") + "\nparallax=" + (g_parallax ? "1" : "0") + "\nlight=" + (g_light ? "1" : "0") + "\nlightmode=" + g_light_mode + "\nlightfix=" + g_light_fix + "\nlightspeed=" + std::to_string(g_light_speed) + "\nlightreact=" + (g_light_react ? "1" : "0") + "\ntilefx=" + (g_tile_fx ? "1" : "0") + "\n";
 	// v0.4: after a reboot both files were found empty (the data never reached the disk before the
 	// console went down; the rotation rewrites the config every few minutes). Write a temporary file,
 	// flush it, rename it over. config.bak is the safe copy: it is only rewritten when a SETTING
@@ -954,7 +960,7 @@ void* send_symbols_thread(void* arg) {
 	uint32_t pad = 0xffffffffu, us = 0xffffffffu;
 	kernel_dynlib_handle(pid, "libScePad.sprx", &pad);
 	kernel_dynlib_handle(pid, "libSceUserService.sprx", &us);
-	for (const char* name : {"scePadGetHandle", "scePadSetLightBar", "scePadResetLightBar", "scePadInit", "scePadOpen"}) {
+	for (const char* name : {"scePadGetHandle", "scePadSetLightBar", "scePadResetLightBar", "scePadInit", "scePadOpen", "scePadReadState"}) {
 		const unsigned long a = pad != 0xffffffffu ? kernel_dynlib_dlsym(pid, pad, name) : 0;
 		if (a != 0) {
 			snprintf(line, sizeof(line), "%s %lx\n", name, a);
@@ -1465,6 +1471,8 @@ State get_state() {
 		st.light_mode = g_light_mode;
 		st.light_fix  = g_light_fix;
 		st.light_speed = g_light_speed;
+		st.light_react = g_light_react;
+		st.tile_fx     = g_tile_fx;
 		st.game       = g_game_running ? g_game_title : std::string();
 	}
 	st.status = shellui_status();
@@ -1617,6 +1625,10 @@ bool set_option(const std::string& key, bool on, std::string& error) {
 		g_game_pause = on;
 	} else if (key == "light") {
 		g_light = on; // focus_thread (light_step) picks it up within 0.2 s
+	} else if (key == "lightreact") {
+		g_light_react = on; // sent with the next "K" (light_step, within 0.2 s)
+	} else if (key == "tilefx") {
+		g_tile_fx = on;
 	} else if (key == "parallax") {
 		g_parallax = on;
 		write_text(kParallaxFile, on ? "1\n" : "0\n");
@@ -1727,6 +1739,8 @@ bool reset_settings(std::string& error) {
 	g_light_mode = "follow";
 	g_light_fix  = "22b8ff";
 	g_light_speed = 1;
+	g_light_react = true;
+	g_tile_fx     = true;
 	write_text(kMenusFile, "1\n");
 	if (g_current.empty() || !exists(g_current.c_str())) {
 		const std::vector<Video> videos = list_videos();
@@ -2296,6 +2310,24 @@ void light_step() {
 			said = false;
 		}
 		g_light_now = want.rfind("solid ", 0) == 0 ? want.substr(want.size() - 6) : want == "off" ? "off" : g_light_mode;
+	}
+	// v0.5: button flashes + highlighted-tile glow, with the playing clip's colour for the glow.
+	{
+		static std::string last_k;
+		std::string        k;
+		{
+			std::lock_guard<std::mutex> lock(g_ctl);
+			const std::string clip = g_store_only ? store_clip() : (!g_override.empty() ? g_override : g_current);
+			std::string       col  = clip.empty() || clip == "off" ? std::string() : clip_color(clip);
+			if (col.size() != 6) col = "22b8ff";
+			k = std::string("K ") + (g_light_react && g_light ? "1" : "0") + " " + (g_tile_fx ? "1" : "0") + " " + col;
+		}
+		static int         kbeat = 0;
+		if (k != last_k || ++kbeat >= 10) {
+			kbeat  = 0;
+			last_k = k;
+			send_module(k);
+		}
 	}
 	// v0.3.2: over UDP (the module keeps the last one), repeated every ~2 s so a module that starts
 	// later still gets it; the file stays as a fallback when it fits.

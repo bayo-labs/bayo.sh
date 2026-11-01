@@ -4116,6 +4116,11 @@ int (*p_fg_user)(int* user)                              = nullptr;
 int (*p_pad_init)()                                      = nullptr;
 int (*p_pad_open)(int user, int type, int index, const void* param) = nullptr;
 int (*p_login_users)(int* users)                         = nullptr;
+int (*p_pad_read)(int handle, void* data)                = nullptr; // v0.5: scePadReadState (buttons)
+// v0.5 "K <react> <tilefx> <RRGGBB>" from the payload
+std::atomic<bool>     g_react {false};
+std::atomic<bool>     g_tilefx {false};
+std::atomic<uint32_t> g_wall_rgb {0x22b8ffu};
 
 int pad_handle_now() {
 	static int dumps = 0;
@@ -4257,6 +4262,15 @@ void* cmd_udp_thread(void*) {
 				snprintf(g_wg_text, sizeof(g_wg_text), "%s", buf + 2);
 				++g_wg_seq;
 			}
+		} else if (buf[0] == 'K' && buf[1] == ' ') {
+			int      r = 0, t = 0;
+			char     hex[8] = {};
+			if (sscanf(buf + 2, "%d %d %7s", &r, &t, hex) >= 2) {
+				if (g_react.load() != (r != 0) || g_tilefx.load() != (t != 0)) wp_log("command: K react %d tilefx %d", r, t);
+				g_react  = r != 0;
+				g_tilefx = t != 0;
+				if (strlen(hex) == 6) g_wall_rgb = static_cast<uint32_t>(strtoul(hex, nullptr, 16));
+			}
 		} else if (buf[0] == 'C' && buf[1] == ' ') {
 			if (strcmp(buf + 2, g_fx_text) != 0) {
 				snprintf(g_fx_text, sizeof(g_fx_text), "%s", buf + 2);
@@ -4286,9 +4300,16 @@ void* light_thread(void*) {
 	bool     told      = true;
 	uint32_t sent      = 0xffffffffu;
 	int      tick      = 0, refresh = 0, fails = 0;
+	// v0.5 button flashes: read the pad ~40 times/s and blend a PlayStation colour in for 0.4 s.
+	uint32_t prev_buttons = 0, flash_col = 0;
+	long     flash_t = 0;
+	int      read_fails = 0;
+	bool     read_told = false;
+	alignas(16) uint8_t pad_data[512];
 	for (;;) {
-		usleep(50 * 1000);
-		if (tick++ % 8 == 0) {
+		const bool react = g_react.load() && p_pad_read != nullptr && read_fails < 20;
+		usleep(react ? 25 * 1000 : 50 * 1000);
+		if (tick++ % (react ? 16 : 8) == 0) {
 			char line[160] = {};
 			static int udp_seen = 0;
 			if (g_light_udp_seq.load() != 0) {
@@ -4323,6 +4344,29 @@ void* light_thread(void*) {
 			continue; // never touched the bar: leave the system's colour alone
 		}
 		const long  ms  = now_ms();
+		if (react && !off && handle >= 0) {
+			memset(pad_data, 0, sizeof(pad_data));
+			const int rr = p_pad_read(handle, pad_data);
+			if (rr != 0) {
+				if (++read_fails >= 20) wp_log("buttons: scePadReadState rc %#x, flashes off", static_cast<unsigned>(rr));
+			} else {
+				read_fails = 0;
+				uint32_t buttons = 0;
+				memcpy(&buttons, pad_data, sizeof(buttons)); // ScePadData.buttons comes first
+				if (!read_told) {
+					read_told = true;
+					wp_log("buttons: reading the pad (handle %#x)", static_cast<unsigned>(handle));
+				}
+				const uint32_t down = buttons & ~prev_buttons;
+				prev_buttons        = buttons;
+				if (down != 0) {
+					// △ green, ○ red, ✕ blue, □ pink; anything else white
+					flash_col = (down & 0x1000u) ? 0x2ee5b5u : (down & 0x2000u) ? 0xff3b3bu : (down & 0x4000u) ? 0x3d8bffu
+					          : (down & 0x8000u) ? 0xff3d9au : 0xffffffu;
+					flash_t   = ms;
+				}
+			}
+		}
 		const float per = req.speed == 0 ? 1.6f : req.speed == 2 ? 0.55f : 1.0f; // slow / normal / fast
 		uint32_t    col = req.n > 0 ? req.c[0] : 0x22b8ffu;
 		if (strcmp(req.mode, "rainbow") == 0) {
@@ -4339,6 +4383,15 @@ void* light_thread(void*) {
 			const int   i   = static_cast<int>(pos);
 			const float f   = pos - i;
 			col = light_mix(req.c[i % req.n], req.c[(i + 1) % req.n], f < 0.6f ? 0 : (f - 0.6f) / 0.4f);
+		}
+		if (flash_t != 0 && !off) {
+			const long e = ms - flash_t;
+			if (e >= 420) {
+				flash_t = 0;
+			} else {
+				const float t = static_cast<float>(e) / 420.0f;
+				col = light_mix(flash_col, col, t * t); // full colour at once, then eases back
+			}
 		}
 		if (!off && col == sent && ++refresh < 60) {
 			continue;
@@ -4594,6 +4647,7 @@ extern "C" int main(int argc, char const* argv[]) {
 		p_pad_init    = reinterpret_cast<int (*)()>(rx_lookup("scePadInit"));
 		p_pad_open    = reinterpret_cast<int (*)(int, int, int, const void*)>(rx_lookup("scePadOpen"));
 		p_login_users = reinterpret_cast<int (*)(int*)>(rx_lookup("sceUserServiceGetLoginUserIdList"));
+		p_pad_read    = reinterpret_cast<int (*)(int, void*)>(rx_lookup("scePadReadState"));
 		wp_log("light bar symbols: handle %p set %p reset %p user %p", reinterpret_cast<void*>(p_pad_handle),
 		       reinterpret_cast<void*>(p_pad_light), reinterpret_cast<void*>(p_pad_reset), reinterpret_cast<void*>(p_fg_user));
 		g_dlsym                   = nullptr;
