@@ -2990,7 +2990,22 @@ Obj   g_halo[kHaloRings] = {};
 // v0.5.2: once the tile was found on screen the spot is exact, so the outline can be two rounded
 // panels behind the tile (glow, rim) that peek out around it with the tile's own round corners.
 // The strips above stay for a spot placed by hand (no solid block if it is a bit off).
-Obj   g_halo_round[2] = {};
+Obj   g_halo_round[2] = {}; // [0] soft glow; [1] unused since v0.5.3
+// v0.5.3 (user: like the Zelda example): a thin rim whose colour runs blue -> purple -> pink around the
+// tile and slowly turns. A panel has one colour, so the rim is pieces behind the tile: 4 rounded
+// corners and 8 short segments per side, each with its own point of the gradient.
+constexpr int kRimSeg = 8;
+Obj   g_rim_corner[4] = {};
+Obj   g_rim_seg[4][kRimSeg] = {};
+const float kRimPal[3][3] = {{0.13f, 0.72f, 1.0f}, {0.66f, 0.33f, 0.97f}, {1.0f, 0.24f, 0.60f}}; // 22b8ff a855f7 ff3d9a
+
+void rim_color(float t, float* c) { // smooth loop through the three colours
+	t = (t - floorf(t)) * 3.0f;
+	const int   i = static_cast<int>(t) % 3, j = (i + 1) % 3;
+	float       f = t - floorf(t);
+	f             = f * f * (3 - 2 * f);
+	for (int k = 0; k < 3; ++k) c[k] = kRimPal[i][k] + (kRimPal[j][k] - kRimPal[i][k]) * f;
+}
 Obj   g_spark[kSparks]   = {};
 float g_sp_x[kSparks], g_sp_y[kSparks], g_sp_vx[kSparks], g_sp_vy[kSparks];
 long  g_sp_t0 = 0, g_halo_kick = 0, g_tfx_preview_fire = 0;
@@ -3011,6 +3026,16 @@ bool tfx_build() {
 		if (g_halo_round[i] == nullptr) return false;
 		wg_visible(g_halo_round[i], false);
 	}
+	for (int i = 0; i < 4; ++i) {
+		g_rim_corner[i] = fx_panel(-500.0f, 0.0f, 10.0f, 10.0f);
+		if (g_rim_corner[i] == nullptr) return false;
+	}
+	for (int e = 0; e < 4; ++e) {
+		for (int k = 0; k < kRimSeg; ++k) {
+			g_rim_seg[e][k] = fx_panel(-500.0f, 0.0f, 4.0f, 4.0f);
+			if (g_rim_seg[e][k] == nullptr) return false;
+		}
+	}
 	for (int i = 0; i < kHaloRings; ++i) {
 		g_halo[i] = fx_panel(-500.0f, 0.0f, 10.0f, 10.0f);
 		if (g_halo[i] == nullptr) return false;
@@ -3029,6 +3054,10 @@ void tfx_hide() {
 	g_tfx_shown = false;
 	for (Obj o : g_halo) wg_visible(o, false);
 	for (Obj o : g_halo_round) wg_visible(o, false);
+	for (Obj o : g_rim_corner) wg_visible(o, false);
+	for (auto& side : g_rim_seg) {
+		for (Obj o : side) wg_visible(o, false);
+	}
 	for (Obj o : g_spark) wg_visible(o, false);
 	g_sp_t0 = 0;
 }
@@ -3106,11 +3135,30 @@ void tile_fx_tick() {
 		last_geo[1] = y0;
 		last_geo[2] = s;
 		last_geo[3] = round_mode;
-		for (int i = 0; i < 2; ++i) { // rounded: glow 8 px out, rim 4 px out, corners like the tile's
-			const float pad = i == 0 ? 8.0f : 4.0f;
-			wg_rect(g_halo_round[i], x0 - pad, y0 - pad, s + 2 * pad, s + 2 * pad);
-			wg_round(g_halo_round[i], s * 0.115f + pad); // PS5 tiles: ~11% corner radius (photo)
-			wg_visible(g_halo_round[i], round_mode > 0);
+		{ // soft glow, 9 px out, very faint
+			const float pad = 9.0f;
+			wg_rect(g_halo_round[0], x0 - pad, y0 - pad, s + 2 * pad, s + 2 * pad);
+			wg_round(g_halo_round[0], s * 0.115f + pad);
+			wg_visible(g_halo_round[0], true);
+			wg_visible(g_halo_round[1], false);
+		}
+		{ // the gradient rim, 4 px out, corners like the tile's (~11.5 % radius)
+			const float pad = 4.0f, L = x0 - pad, T = y0 - pad, W = s + 2 * pad, r = s * 0.115f + pad;
+			const float cx[4] = {L, L + W - 2 * r, L + W - 2 * r, L}, cy[4] = {T, T, T + W - 2 * r, T + W - 2 * r};
+			for (int i = 0; i < 4; ++i) { // TL, TR, BR, BL: rounded squares, mostly hidden behind the tile
+				wg_rect(g_rim_corner[i], cx[i], cy[i], 2 * r, 2 * r);
+				wg_round(g_rim_corner[i], r);
+				wg_visible(g_rim_corner[i], true);
+			}
+			const float run = W - 2 * r, seg = run / kRimSeg, th = pad + 3.0f; // th: reaches under the tile
+			for (int k = 0; k < kRimSeg; ++k) {
+				const float a = r + k * seg;
+				wg_rect(g_rim_seg[0][k], L + a, T, seg + 0.5f, th);                     // top, left to right
+				wg_rect(g_rim_seg[1][k], L + W - th, T + a, th, seg + 0.5f);            // right, top to bottom
+				wg_rect(g_rim_seg[2][k], L + W - a - seg, T + W - th, seg + 0.5f, th);  // bottom, right to left
+				wg_rect(g_rim_seg[3][k], L, T + W - a - seg, th, seg + 0.5f);           // left, bottom to top
+				for (int e = 0; e < 4; ++e) wg_visible(g_rim_seg[e][k], true);
+			}
 		}
 		for (int i = 0; i < kHaloRings && round_mode > 0; ++i) wg_visible(g_halo[i], false);
 		for (int i = 0; i < kHaloRings && round_mode == 0; ++i) {
@@ -3172,8 +3220,23 @@ void tile_fx_tick() {
 		void* glow = tint_q(r, g, b, preview ? 0.45f : 0.16f + 0.10f * (0.5f + 0.5f * sinf(now / 900.0f)) + 0.20f * kick);
 		void* rim  = tint_q(r, g, b, 1.0f);
 		if (round_mode > 0) {
-			if (glow != nullptr) property_set(g_dim_class, g_halo_round[0], g_dim_prop, glow);
-			if (rim != nullptr) property_set(g_dim_class, g_halo_round[1], g_dim_prop, rim);
+			// gradient around the tile (clockwise from the top-left corner), turning once every 6 s;
+			// a move brightens it for a moment
+			const float shift = now / 6000.0f, lift2 = 0.12f + 0.35f * kick;
+			auto paint = [&](Obj o, float t, float a) {
+				float c[3];
+				rim_color(t - shift, c);
+				for (float& v : c) v = v + (1 - v) * lift2;
+				void* col = tint_q(c[0], c[1], c[2], a);
+				if (col != nullptr) property_set(g_dim_class, o, g_dim_prop, col);
+			};
+			for (int i = 0; i < 4; ++i) paint(g_rim_corner[i], i * 0.25f, 1.0f);
+			for (int e = 0; e < 4; ++e) {
+				for (int k = 0; k < kRimSeg; ++k) paint(g_rim_seg[e][k], e * 0.25f + (k + 0.5f) / kRimSeg * 0.25f, 1.0f);
+			}
+			paint(g_halo_round[0], 0.5f, preview ? 0.40f : 0.10f + 0.05f * (0.5f + 0.5f * sinf(now / 900.0f)) + 0.15f * kick);
+			(void)glow;
+			(void)rim;
 		} else {
 			for (int k = 0; k < kHaloRings; ++k) {
 				void* col = k >= 4 ? rim : glow;
