@@ -8,8 +8,8 @@
   - **Probar efecto**: míralo 45 s aunque no esté lloviendo.
 - **Luz con los botones**: el LED del DualSense destella con cada botón (△ verde, ○ rojo, ✕ azul,
   □ rosa) y regresa a su modo. Si el control no se puede leer, se apaga solo y queda en el registro.
-- **Contorno y chispas en el juego elegido**: un borde de luz pegado al cajón del juego (como un
-  marco neón) cuyo color se mueve alrededor del color de tu fondo, y chispas que salen de las cuatro
+- **Contorno y chispas en el juego elegido**: un borde delgado pegado al cajón del juego, con las
+  esquinas redondas del cajón y un degradado azul → morado → rosa que gira despacio, y chispas que salen de las cuatro
   orillas del cajón cada vez que te mueves. Unos segundos después de aparecer el inicio busca el
   cajón por sí solo en el menú y lo sigue al moverte (solo recorre la fila de juegos); si no lo
   encuentra, usa la posición medida en un PS5 o la que acomodes en Efectos → **Ajustar posición**.
