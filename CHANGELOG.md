@@ -1,5 +1,40 @@
 # Cambios
 
+## v0.5.0 — 2026-11-01
+- **Efecto del clima** sobre tu propio fondo: lluvia, llovizna, tormenta (con relámpagos), nieve o
+  niebla según el clima de tu ciudad (Open-Meteo). El video que elegiste no cambia: el efecto va
+  encima, debajo de la tarjeta de widgets, y se detiene cuando no hay video.
+  - Ajustes → Widgets del inicio → **Efecto del clima**: No / Suave / Fuerte.
+  - **Probar efecto**: míralo 45 s aunque no esté lloviendo.
+- **Luz con los botones**: el LED del DualSense destella con cada botón (△ verde, ○ rojo, ✕ azul,
+  □ rosa) y regresa a su modo. Si el control no se puede leer, se apaga solo y queda en el registro.
+- **Contorno y chispas en el juego elegido**: un borde de luz pegado al cajón del juego (como un
+  marco neón) cuyo color se mueve alrededor del color de tu fondo, y chispas que salen de las cuatro
+  orillas del cajón cada vez que te mueves. Unos segundos después de aparecer el inicio busca el
+  cajón por sí solo en el menú y lo sigue al moverte (solo recorre la fila de juegos); si no lo
+  encuentra, usa la posición medida en un PS5 o la que acomodes en Efectos → **Ajustar posición**.
+- **Tablero de widgets** (626 × 178 px, arriba a la derecha bajo la hora del PS5): dos filas alineadas a la derecha. Arriba, un **reloj digital** de 7
+  segmentos con la fecha al lado, el **clima** (con tu colonia) y **Jugado hoy**. Abajo, tres
+  **medidores de anillo**: **Consola** (temperatura), **Disco** (qué tan lleno está; abajo alterna los GB libres) y **Control**
+  (batería), con una luz que recorre el anillo. Cada mosaico se apaga por separado y los demás se
+  recorren. El borde de cada mosaico usa los modos de contorno (Ola, Neón, Arcoíris…).
+  Los mosaicos flotan suave uno tras otro y una franja de luz cruza el cristal de cada uno.
+- Los colores animados del menú ya no crean un objeto nuevo en cada cambio (caché de colores): la
+  memoria del menú no crece con el tiempo.
+- **Recortar**: Convertir y aplicar ahora deja elegir desde dónde y hasta dónde (vista previa en
+  bucle). Botón **Recortar** en cada video compatible: guarda `<nombre>_recorte.mp4` y lo pone de
+  fondo sin borrar el original.
+- **Cerrar** busca la ventana de bayo.sh en todas las listas de apps del menú y solo cierra esa
+  (BYSH00001); deja en el registro los métodos que encontró.
+- Arreglos:
+  - **Espacio libre** igual que Ajustes → Almacenamiento: se descuenta la reserva del sistema
+    (prueba en PS5 Slim: el widget decía 273 GB y Ajustes 187.2 GB).
+  - Textos de la tarjeta sin cortar: tarjeta más ancha, "Temperatura" → "Consola",
+    "Algo nublado" y el lugar sin "Delegación" / "Alcaldía".
+  - widgets.txt ya no se puede guardar antes de leerse (un juego abierto al arrancar podía borrar
+    la ciudad y los ajustes de widgets).
+- Traducciones de todo lo nuevo en los 10 idiomas.
+
 ## v0.4.0 — 2026-10-19
 - **Widgets en el inicio**: tarjeta "cristal neón" sobre tu fondo con 4 filas.
   - **Clima**: de tu ciudad o colonia, o detectado solo por tu red. Usa Open-Meteo; las colonias y

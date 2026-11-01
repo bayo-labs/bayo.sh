@@ -7,7 +7,7 @@
 <p align="center"><b>Animated video wallpapers for your PS5 home screen.</b></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.4.0-22b8ff?style=flat-square" alt="version">
+  <img src="https://img.shields.io/badge/version-0.5.0-22b8ff?style=flat-square" alt="version">
   <img src="https://img.shields.io/badge/platform-PS5-22b8ff?style=flat-square" alt="platform">
   <img src="https://img.shields.io/badge/tested-13.60%20%2B%20etaHEN-22b8ff?style=flat-square" alt="tested">
   <img src="https://img.shields.io/badge/license-GPL--3.0-22b8ff?style=flat-square" alt="license">
@@ -29,12 +29,15 @@
 - **Rest mode**: comes back on its own when the console wakes up.
 - **App on the home screen** (Media) to control everything with the controller.
 - **From your phone or PC**: open `http://PS5-IP:9050` to upload videos and control everything.
-- **Controller light**: the DualSense LED follows your wallpaper's color, or use Solid, Rainbow, Breathing or Wave modes.
+- **Controller light**: the DualSense LED follows your wallpaper's color, or use Solid, Rainbow, Breathing or Wave modes. It also **flashes with every button**: △ green, ○ red, ✕ blue, □ pink.
 - **Any video**: if it is not compatible (4K, HEVC, 60+ fps…), the **Convert and apply** button turns it into 1080p from your phone or PC.
+- **Trim**: pick where the video starts and ends before converting it; the preview loops that part.
 - **Download from a link**: paste an .mp4 link and the PS5 downloads it to your wallpapers.
 - **Discover**: a catalog of animated wallpapers with search and categories; **Download → Use** without leaving the app.
 - **WallpaperWaifu in Discover**: browse their wallpapers (categories, search, 1080p filter) and press their green download button; the PS5 saves it to your wallpapers.
-- **Home screen widgets**: a glass card with your city's weather (or detected automatically), PS5 temperature, free space and controller battery. The data moves and changes colour, and the outline glows in Wave, Neon, Rainbow, Follow, Solid or Breathing mode.
+- **Weather effect**: when it rains, snows, gets foggy or stormy in your city, that effect shows on top of **your own wallpaper** (the wallpaper stays the same). Soft or Strong, with a button to try it.
+- **Outline and sparks**: a light frame around the selected game and sparks out of its tile as you move between games (adjustable position).
+- **Home screen widgets**: a neon dashboard with a digital clock, ring gauges, time and date, your city's weather (or detected automatically), PS5 temperature, free space (the same number as Settings), controller battery and time played today with your last game. The data moves and changes colour, and the outline glows in Wave, Neon, Rainbow, Follow, Solid or Breathing mode.
 - **QR for your phone**: scan it from the guide or the home tab and the app opens on your phone.
 - **Your own catalogs**: publish a `.json` with your wallpapers and anyone can add it with its link ([format](catalog/README.md)).
 - **Rotation**: change the wallpaper every 5, 15, 30 min or 1 h, shuffled or in order.
@@ -88,7 +91,7 @@ The result is `dist/bayosh.elf`. The script applies `patches/onionhen-detour.pat
 | `src/bayosh_shellui.cpp` | The module that runs inside the PS5 menu and plays the wallpaper video |
 | `src/bayosh_web.cpp` | Web server on port 9050 (the app and the phone page) |
 | `src/bayosh_tile.cpp` | The app's tile on the home screen |
-| `src/bayosh_widgets.cpp` | Home screen widgets (weather, temperature, storage, battery) |
+| `src/bayosh_widgets.cpp` | Home screen widgets (time, weather, temperature, storage, battery, time played) and the weather effect |
 | `src/bayosh_tls.cpp` | Built-in HTTPS with Mbed TLS (catalogs, downloads, weather) |
 | `src/bayosh_page.html` | The interface (PS5, PC and phone) |
 

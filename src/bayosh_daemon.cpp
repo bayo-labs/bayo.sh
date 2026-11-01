@@ -126,6 +126,13 @@ std::string g_light_now  = "off"; // last value written to kLightFile
 std::string g_light_mode = "follow"; // follow | fixed | rainbow | breathe | wave
 std::string g_light_fix  = "22b8ff";
 int         g_light_speed = 1;
+bool        g_light_react = true; // v0.5: the light bar flashes with each button (PlayStation colours)
+bool        g_tile_fx     = true; // v0.5: glow behind the highlighted game + sparks when it moves
+int         g_tile_x = 162, g_tile_y = 118, g_tile_s = 181; // where that tile is drawn (1080p), set in the app
+bool        g_tile_ready  = false; // v0.5.1: lined up by the user (or detected): only then the outline shows
+bool        g_tile_follow = false; // found on screen by "Detectar sola": the module follows the tile itself
+std::string g_tile_detect_result;  // "", "ok", "none" (for the app)
+long long   g_tile_preview_until = 0; // ms: show the glow strongly while the user lines it up
 bool        g_game_running = false;
 std::string g_game_title;
 std::string g_override;     // per-game clip playing instead of g_current ("" = main wallpaper)
@@ -421,10 +428,11 @@ void load_config() {
 		}
 	}
 	size_t            pos  = 0;
+	int               saved_tile[3] = {-1, -1, -1}; // v0.5.2: used only if the user placed it / it was detected
 	g_config_extra.clear();
 	static const char* const kKnown[] = {"enabled=", "video=", "dim=", "volume=", "blur=", "looks=", "shuffle=", "rotate=",
 	                                     "rotorder=", "mainvideo=", "gamevideos=", "gamepause=", "menuhide=", "storeonly=",
-	                                     "parallax=", "light=", "lightmode=", "lightfix=", "lightspeed="};
+	                                     "parallax=", "light=", "lightmode=", "lightfix=", "lightspeed=", "lightreact=", "tilefx=", "tilepos=", "tileready=", "tilefollow="};
 	while (pos < text.size()) {
 		const size_t      end  = text.find('\n', pos);
 		const std::string line = first_line(text.substr(pos, end == std::string::npos ? std::string::npos : end - pos));
@@ -468,6 +476,21 @@ void load_config() {
 			g_light_mode = line.substr(10);
 		} else if (line.rfind("lightfix=", 0) == 0) {
 			g_light_fix = line.substr(9);
+		} else if (line.rfind("lightreact=", 0) == 0) {
+			g_light_react = line.substr(11) != "0";
+		} else if (line.rfind("tilefx=", 0) == 0) {
+			g_tile_fx = line.substr(7) != "0";
+		} else if (line.rfind("tileready=", 0) == 0) {
+			g_tile_ready = line.substr(10) != "0";
+		} else if (line.rfind("tilefollow=", 0) == 0) {
+			g_tile_follow = line.substr(11) != "0";
+		} else if (line.rfind("tilepos=", 0) == 0) {
+			int x = 0, y = 0, sz = 0;
+			if (sscanf(line.c_str() + 8, "%d %d %d", &x, &y, &sz) == 3 && sz >= 40 && sz <= 700) {
+				saved_tile[0] = x;
+				saved_tile[1] = y;
+				saved_tile[2] = sz;
+			}
 		} else if (line.rfind("lightspeed=", 0) == 0) {
 			g_light_speed = std::max(0, std::min(2, atoi(line.c_str() + 11)));
 		}
@@ -485,6 +508,9 @@ void load_config() {
 		}
 		pos = end + 1;
 	}
+	if (saved_tile[2] > 0 && (g_tile_ready || g_tile_follow)) {
+		g_tile_x = saved_tile[0], g_tile_y = saved_tile[1], g_tile_s = saved_tile[2];
+	}
 	log("config: %zu bytes%s, enabled=%d video=%s dim=%d shuffle=%d rotate=%d gamepause=%d", text.size(),
 	    from_bak ? " (from config.bak)" : "", g_enabled ? 1 : 0, g_current.c_str(), g_dim, g_shuffle ? 1 : 0, g_rotate,
 	    g_game_pause ? 1 : 0);
@@ -500,7 +526,7 @@ void load_config() {
 std::string g_bak_settings; // what config.bak holds (without the video line)
 void save_config() {
 	const std::string text = g_config_extra + std::string("enabled=") + (g_enabled ? "1" : "0") + "\nvideo=" + g_current + "\ndim=" + std::to_string(g_dim) + "\nvolume=" + std::to_string(g_volume) + "\nblur=" + std::to_string(g_blur) + "\nlooks=" + looks_text() +
-	                            "\nshuffle=" + (g_shuffle ? "1" : "0") + "\nrotate=" + std::to_string(g_rotate) + "\nrotorder=" + (g_rot_order ? "order" : "random") + "\nmainvideo=" + (g_main_video ? "1" : "0") + "\ngamevideos=" + (g_game_videos ? "1" : "0") + "\ngamepause=" + (g_game_pause ? "1" : "0") + "\nmenuhide=" + (g_menu_hide ? "1" : "0") + "\nstoreonly=" + (g_store_only ? "1" : "0") + "\nparallax=" + (g_parallax ? "1" : "0") + "\nlight=" + (g_light ? "1" : "0") + "\nlightmode=" + g_light_mode + "\nlightfix=" + g_light_fix + "\nlightspeed=" + std::to_string(g_light_speed) + "\n";
+	                            "\nshuffle=" + (g_shuffle ? "1" : "0") + "\nrotate=" + std::to_string(g_rotate) + "\nrotorder=" + (g_rot_order ? "order" : "random") + "\nmainvideo=" + (g_main_video ? "1" : "0") + "\ngamevideos=" + (g_game_videos ? "1" : "0") + "\ngamepause=" + (g_game_pause ? "1" : "0") + "\nmenuhide=" + (g_menu_hide ? "1" : "0") + "\nstoreonly=" + (g_store_only ? "1" : "0") + "\nparallax=" + (g_parallax ? "1" : "0") + "\nlight=" + (g_light ? "1" : "0") + "\nlightmode=" + g_light_mode + "\nlightfix=" + g_light_fix + "\nlightspeed=" + std::to_string(g_light_speed) + "\nlightreact=" + (g_light_react ? "1" : "0") + "\ntilefx=" + (g_tile_fx ? "1" : "0") + "\ntilepos=" + std::to_string(g_tile_x) + " " + std::to_string(g_tile_y) + " " + std::to_string(g_tile_s) + "\ntileready=" + (g_tile_ready ? "1" : "0") + "\ntilefollow=" + (g_tile_follow ? "1" : "0") + "\n";
 	// v0.4: after a reboot both files were found empty (the data never reached the disk before the
 	// console went down; the rotation rewrites the config every few minutes). Write a temporary file,
 	// flush it, rename it over. config.bak is the safe copy: it is only rewritten when a SETTING
@@ -671,6 +697,8 @@ void* ui_thread(void*) {
 			(buf[0] == 'S' ? g_ui_status_set : g_ui_focus_set) = true;
 		} else if (buf[0] == 'B') {
 			widgets_battery(std::string(buf + 1, static_cast<size_t>(n - 1)));
+		} else if (buf[0] == 'T') {
+			tile_detected(std::string(buf + 1, static_cast<size_t>(n - 1)));
 		} else if (buf[0] == 'L' && lf >= 0) {
 			struct stat st {};
 			if (fstat(lf, &st) == 0 && st.st_size > 2 * 1024 * 1024) {
@@ -954,7 +982,7 @@ void* send_symbols_thread(void* arg) {
 	uint32_t pad = 0xffffffffu, us = 0xffffffffu;
 	kernel_dynlib_handle(pid, "libScePad.sprx", &pad);
 	kernel_dynlib_handle(pid, "libSceUserService.sprx", &us);
-	for (const char* name : {"scePadGetHandle", "scePadSetLightBar", "scePadResetLightBar", "scePadInit", "scePadOpen"}) {
+	for (const char* name : {"scePadGetHandle", "scePadSetLightBar", "scePadResetLightBar", "scePadInit", "scePadOpen", "scePadReadState"}) {
 		const unsigned long a = pad != 0xffffffffu ? kernel_dynlib_dlsym(pid, pad, name) : 0;
 		if (a != 0) {
 			snprintf(line, sizeof(line), "%s %lx\n", name, a);
@@ -1465,6 +1493,14 @@ State get_state() {
 		st.light_mode = g_light_mode;
 		st.light_fix  = g_light_fix;
 		st.light_speed = g_light_speed;
+		st.light_react = g_light_react;
+		st.tile_fx     = g_tile_fx;
+		st.tile_x      = g_tile_x;
+		st.tile_y      = g_tile_y;
+		st.tile_s      = g_tile_s;
+		st.tile_ready  = g_tile_ready;
+		st.tile_follow = g_tile_follow;
+		st.tile_det    = g_tile_detect_result;
 		st.game       = g_game_running ? g_game_title : std::string();
 	}
 	st.status = shellui_status();
@@ -1603,6 +1639,54 @@ void* rotate_thread(void*) {
 	return nullptr;
 }
 
+long long tile_clock_ms() {
+	timespec t {};
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	return static_cast<long long>(t.tv_sec) * 1000 + t.tv_nsec / 1000000;
+}
+
+// v0.5: where the highlighted game tile is drawn, for its glow and sparks. Shows a preview for 20 s.
+bool set_tile_pos(int x, int y, int size, bool save) {
+	if (size < 40 || size > 700 || x < -200 || x > 1920 || y < -200 || y > 1080) return false;
+	std::lock_guard<std::mutex> lock(g_ctl);
+	g_tile_x             = x;
+	g_tile_y             = y;
+	g_tile_s             = size;
+	g_tile_preview_until = save ? 0 : tile_clock_ms() + 20000;
+	if (save) {
+		g_tile_ready  = true;
+		g_tile_follow = false; // placed by hand
+		save_config();
+		log("tile fx: position %d %d size %d", x, y, size);
+	}
+	return true;
+}
+
+// v0.5.1: ask the module to find the highlighted tile on screen ("Detectar sola"). The answer comes
+// back as "T x y s" or "T none" (ui_thread) and shows in /api/state as tiledet.
+void tile_detect_request() {
+	{
+		std::lock_guard<std::mutex> lock(g_ctl);
+		g_tile_detect_result.clear();
+		g_tile_preview_until = tile_clock_ms() + 8000; // the module only looks while the effect is on
+	}
+	send_module("X tiledetect " + std::to_string(static_cast<long long>(tile_clock_ms())));
+}
+
+void tile_detected(const std::string& msg) {
+	int x = 0, y = 0, sz = 0;
+	std::lock_guard<std::mutex> lock(g_ctl);
+	if (sscanf(msg.c_str(), "%d %d %d", &x, &y, &sz) == 3 && sz >= 40 && sz <= 700) {
+		g_tile_x = x, g_tile_y = y, g_tile_s = sz;
+		g_tile_ready = g_tile_follow = true;
+		g_tile_detect_result = "ok";
+		save_config();
+	} else {
+		g_tile_detect_result = "none";
+	}
+	log("tile fx: detect -> %s", msg.c_str());
+}
+
 bool set_option(const std::string& key, bool on, std::string& error) {
 	std::lock_guard<std::mutex> lock(g_ctl);
 	if (key == "shuffle") {
@@ -1617,6 +1701,10 @@ bool set_option(const std::string& key, bool on, std::string& error) {
 		g_game_pause = on;
 	} else if (key == "light") {
 		g_light = on; // focus_thread (light_step) picks it up within 0.2 s
+	} else if (key == "lightreact") {
+		g_light_react = on; // sent with the next "K" (light_step, within 0.2 s)
+	} else if (key == "tilefx") {
+		g_tile_fx = on;
 	} else if (key == "parallax") {
 		g_parallax = on;
 		write_text(kParallaxFile, on ? "1\n" : "0\n");
@@ -1727,6 +1815,10 @@ bool reset_settings(std::string& error) {
 	g_light_mode = "follow";
 	g_light_fix  = "22b8ff";
 	g_light_speed = 1;
+	g_light_react = true;
+	g_tile_fx     = true;
+	g_tile_x = 162, g_tile_y = 118, g_tile_s = 181;
+	g_tile_ready = g_tile_follow = false;
 	write_text(kMenusFile, "1\n");
 	if (g_current.empty() || !exists(g_current.c_str())) {
 		const std::vector<Video> videos = list_videos();
@@ -2129,6 +2221,7 @@ void* game_thread(void*) {
 			continue;
 		}
 		last = now;
+		widgets_game(now ? std::string(id) : std::string()); // time played today / last game
 		std::lock_guard<std::mutex> lock(g_ctl);
 		g_game_running = now;
 		g_game_title   = now ? id : "";
@@ -2297,6 +2390,26 @@ void light_step() {
 		}
 		g_light_now = want.rfind("solid ", 0) == 0 ? want.substr(want.size() - 6) : want == "off" ? "off" : g_light_mode;
 	}
+	// v0.5: button flashes + highlighted-tile glow, with the playing clip's colour for the glow.
+	{
+		static std::string last_k;
+		std::string        k;
+		{
+			std::lock_guard<std::mutex> lock(g_ctl);
+			const std::string clip = g_store_only ? store_clip() : (!g_override.empty() ? g_override : g_current);
+			std::string       col  = clip.empty() || clip == "off" ? std::string() : clip_color(clip);
+			if (col.size() != 6) col = "22b8ff";
+			k = std::string("K ") + (g_light_react && g_light ? "1" : "0") + " " + (g_tile_fx ? "1" : "0") + " " + col + " " +
+			    std::to_string(g_tile_x) + " " + std::to_string(g_tile_y) + " " + std::to_string(g_tile_s) + " " +
+			    (tile_clock_ms() < g_tile_preview_until ? "1" : "0") + " " + (g_tile_ready ? "1" : "0") + " " + (g_tile_follow ? "1" : "0");
+		}
+		static int         kbeat = 0;
+		if (k != last_k || ++kbeat >= 10) {
+			kbeat  = 0;
+			last_k = k;
+			send_module(k);
+		}
+	}
 	// v0.3.2: over UDP (the module keeps the last one), repeated every ~2 s so a module that starts
 	// later still gets it; the file stays as a fallback when it fits.
 	static int beat = 0;
@@ -2329,7 +2442,7 @@ int main() {
 	// off until the next reboot.
 	unlink("/system_tmp/bayosh/video_trying");
 	g_log = open(kLogFile, O_WRONLY | O_CREAT | O_TRUNC, 0666);
-	log("bayo.sh v0.4.0 starting");
+	log("bayo.sh v0.5.0 starting");
 	if (take_over_running()) {
 		log("handover: took over from the bayo.sh that was running");
 	}

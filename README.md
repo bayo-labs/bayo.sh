@@ -9,7 +9,7 @@
 <p align="center"><b>🇲🇽 Español</b> · <a href="README.en.md">🇺🇸 English</a></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/versión-0.4.0-22b8ff?style=flat-square" alt="versión">
+  <img src="https://img.shields.io/badge/versión-0.5.0-22b8ff?style=flat-square" alt="versión">
   <img src="https://img.shields.io/badge/plataforma-PS5-22b8ff?style=flat-square" alt="plataforma">
   <img src="https://img.shields.io/badge/probado-13.60%20%2B%20etaHEN-22b8ff?style=flat-square" alt="probado">
   <img src="https://img.shields.io/badge/licencia-GPL--3.0-22b8ff?style=flat-square" alt="licencia">
@@ -29,12 +29,15 @@
 - **Reposo**: regresa solo al despertar la consola.
 - **App en el inicio** (Multimedia) para manejar todo con el control.
 - **Desde el celular o la PC**: abre `http://IP-del-PS5:9050` para subir videos y controlar todo.
-- **Luz del control**: el LED del DualSense sigue el color de tu fondo, o usa modos Fijo, Arcoíris, Respiración u Ola.
+- **Luz del control**: el LED del DualSense sigue el color de tu fondo, o usa modos Fijo, Arcoíris, Respiración u Ola. Además **destella con cada botón**: △ verde, ○ rojo, ✕ azul, □ rosa.
 - **Cualquier video**: si no es compatible (4K, HEVC, 60+ fps…), el botón **Convertir y aplicar** lo deja en 1080p desde el celular o la PC.
+- **Recortar**: elige desde dónde y hasta dónde quieres el video antes de convertirlo; la vista previa lo repite en bucle.
 - **Descargar desde un enlace**: pega el enlace de un .mp4 y el PS5 lo baja solo a tus fondos.
 - **Descubrir**: catálogo de fondos animados con buscador y categorías; **Descargar → Usar** sin salir de la app.
 - **WallpaperWaifu en Descubrir**: navega sus fondos (categorías, búsqueda, filtro 1080p) y dale a su botón verde de descarga; el PS5 lo guarda en tus fondos.
-- **Widgets en el inicio**: tarjeta de cristal con clima de tu ciudad (o detectado solo), temperatura del PS5, espacio libre y batería del control. Los datos se mueven y cambian de color, y el contorno brilla en modo Ola, Neón, Arcoíris, Sigue al fondo, Fijo o Respiración.
+- **Efecto del clima**: si llueve, nieva, hay niebla o tormenta en tu ciudad, ese efecto aparece encima de **tu propio fondo** (el fondo no cambia). Suave o Fuerte, con botón para probarlo.
+- **Contorno y chispas**: un marco de luz alrededor del juego elegido y chispas que salen de su cajón al moverte entre juegos (posición ajustable).
+- **Widgets en el inicio**: tablero neón con reloj digital, medidores de anillo, hora y fecha, clima de tu ciudad (o detectado solo), temperatura del PS5, espacio libre (el mismo número que Ajustes), batería del control y tiempo jugado hoy con tu último juego. Los datos se mueven y cambian de color, y el contorno brilla en modo Ola, Neón, Arcoíris, Sigue al fondo, Fijo o Respiración.
 - **QR para el celular**: escanéalo desde la guía o el inicio y se abre la app en tu teléfono.
 - **Catálogos propios**: publica un `.json` con tus fondos y cualquiera lo agrega con su enlace ([formato](catalog/README.md)).
 - **Rotación**: cambia de fondo cada 5, 15, 30 min o 1 h, aleatorio o en orden.
@@ -49,7 +52,7 @@
 Necesitas un PS5 con jailbreak y un cargador de payloads.
 
 1. Copia tus videos `.mp4` a `/data/bayosh/video/` (por FTP), o a una carpeta `bayosh` en una USB.
-2. Carga `bayosh.elf`.
+2. Descarga `bayosh.elf` de [Releases](https://github.com/bayo-labs/bayo.sh/releases/latest) y cárgalo.
 3. Abre **bayo.sh** en Multimedia, elige tu video en **Fondos** y presiona **Usar**.
 
 También puedes subir los videos desde el celular: abre `http://IP-del-PS5:9050` en el navegador (misma red Wi-Fi).
@@ -88,7 +91,7 @@ El resultado queda en `dist/bayosh.elf`. El script aplica `patches/onionhen-deto
 | `src/bayosh_shellui.cpp` | El módulo que corre dentro del menú del PS5 y pone el video de fondo |
 | `src/bayosh_web.cpp` | Servidor web en el puerto 9050 (la app y la página del celular) |
 | `src/bayosh_tile.cpp` | El ícono de la app en el inicio |
-| `src/bayosh_widgets.cpp` | Widgets del inicio (clima, temperatura, disco, batería) |
+| `src/bayosh_widgets.cpp` | Widgets del inicio (hora, clima, temperatura, disco, batería, tiempo jugado) y efecto del clima |
 | `src/bayosh_tls.cpp` | HTTPS propio con mbedTLS (catálogos, descargas, clima) |
 | `src/bayosh_page.html` | La interfaz (PS5, PC y celular) |
 

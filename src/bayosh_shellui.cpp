@@ -66,9 +66,16 @@ constexpr const char* kCmdFile    = "/system_tmp/bayosh/cmd.txt"; // v0.3.2: "ex
 std::atomic<bool>     g_exit_app_req {false};
 char                  g_light_udp[160] = {}; // v0.3.2: last "L ..." from the payload (UDP 9053)
 // v0.4 widgets: last "W ..." from the payload; read on the UI thread when the sequence moves.
-char                  g_wg_text[700] = {};
+char                  g_wg_text[900] = {};
 std::atomic<int>      g_wg_seq {0};
 std::atomic<int>      g_light_udp_seq {0};
+// v0.5 weather effect: last "C <kind> <level>" from the payload.
+char                  g_fx_text[64] = {};
+std::atomic<int>      g_fx_seq {0};
+// v0.5 "K <react> <tilefx> <RRGGBB>" from the payload
+std::atomic<bool>     g_react {false};
+std::atomic<bool>     g_tilefx {false};
+std::atomic<uint32_t> g_wall_rgb {0x22b8ffu};
 
 constexpr const char* kLogFile    = "/system_tmp/bayosh/shellui.log";
 constexpr const char* kGuardFile  = "/system_tmp/bayosh/video_trying";
@@ -1772,6 +1779,30 @@ void* tint(float r, float g, float b, float a) {
 	return invoke(mono_class_get_method_from_name(g_color_class, ".ctor", 4), raw, args, "UIColor()") ? raw : nullptr;
 }
 
+// v0.5: tint() pins a new boxed UIColor on every call and never lets it go. Animated colours (the
+// widget outline at ~15 updates/s) made that grow without end. Colours are quantised (32 steps per
+// channel and alpha) and each one is built once; the setters copy the value, so sharing is fine.
+void* tint_q(float r, float g, float b, float a) {
+	struct Entry { uint32_t key; void* raw; };
+	static Entry cache[2048] = {};
+	static int   used        = 0;
+	auto q = [](float v) { v = v < 0 ? 0 : v > 1 ? 1 : v; return static_cast<uint32_t>(v * 31.0f + 0.5f); };
+	const uint32_t key = 0x80000000u | q(r) << 15 | q(g) << 10 | q(b) << 5 | q(a);
+	uint32_t       h   = (key * 2654435761u) >> 21; // 11 bits
+	for (int probe = 0; probe < 2048; ++probe, h = (h + 1) & 2047) {
+		if (cache[h].key == key) return cache[h].raw;
+		if (cache[h].key == 0) {
+			if (used >= 1800) break; // full: fall back to a fresh one (still correct)
+			void* raw = tint(q(r) / 31.0f, q(g) / 31.0f, q(b) / 31.0f, q(a) / 31.0f);
+			if (raw == nullptr) return nullptr;
+			cache[h] = {key, raw};
+			++used;
+			return raw;
+		}
+	}
+	return tint(r, g, b, a);
+}
+
 bool add_band(Look look, float x, float y, float w, float h, float weight) {
 	if (g_look_count[look] >= 40) {
 		return false;
@@ -1839,24 +1870,61 @@ void build_look(Look look) {
 	wp_log("look %d: %d panels", static_cast<int>(look), g_look_count[look]);
 }
 
-// ---- v0.4 widgets: a "cristal neón" card on the home screen ------------------------------------
-// Built like the looks (UI3 Panels under the dim panel, so it stays above the video and leaves with
-// it) plus PUI Labels for the text. The payload sends "W <on>\t<title>\t<value>..." (UDP 9053).
-constexpr int kWgRows = 4;
-constexpr int kWgEdges = 8; // 4 sides x (glow, core)
+Obj fx_root(); // v0.5 weather layer (below)
+const char* type_of_getter(Obj klass, const char* prop_name); // blur section
+Obj find_class(const char* dll, const char* name);            // "In menus: hide" section
+int px_transition(); // v0.5: BGLayerPlugin.TransitionType this frame (parallax section)
+extern int g_px_left, g_px_right;
+
+// ---- v0.5 widgets: a neon dashboard on the home screen ------------------------------------------
+// Two rows, right-aligned, same width: [clock][weather][played] over three ring gauges [console]
+// [storage][controller]. Everything is plain UI3 Panels and Labels in one container under the dim
+// panel (it stays above the video and leaves with it). PUI's Label text size cannot be changed, so
+// the clock's digits are drawn as 7-segment panels and the gauges as rings of dots.
+// The payload sends "W <on> <style> [colours]\t<RRGGBB|title|pct|kind>\t<main\x1fsmall>..." (UDP 9053);
+// kind: t clock, w weather, j played, c console, d storage, p controller.
+constexpr int kWgRows = 6;
+constexpr int kDots   = 26; // per ring gauge
+constexpr int kSegs   = 28; // 4 digits x 7 segments
+enum SlotType { kText, kClock, kGauge };
+struct Slot {
+	char  kind;
+	int   row;
+	float w, h;
+	int   type;
+};
+// v0.5.1 compact (user: too big): 626 x 178 in all. The system font cannot shrink (~14 px a
+// character, ~30 px a line), so tiles are sized to two lines of text.
+const Slot kSlot[kWgRows] = {{'t', 0, 246, 78, kClock}, {'w', 0, 185, 78, kText}, {'j', 0, 175, 78, kText},
+                             {'c', 1, 202, 92, kGauge}, {'d', 1, 202, 92, kGauge}, {'p', 1, 202, 92, kGauge}};
+const float kWgGap   = 8.0f;
+const float kRowTopH = 78.0f, kRowBotH = 92.0f;
 Obj   g_wg_label_class = nullptr;
-Obj   g_wg_card        = nullptr;
-Obj   g_wg_halo        = nullptr;          // soft rounded glow behind the card
-Obj   g_wg_edge[kWgEdges] = {};            // neon outline (glow + core line per side)
+Obj   g_wg_card        = nullptr; // container
+Obj   g_wg_glow[kWgRows] = {}, g_wg_rim[kWgRows] = {}, g_wg_tile[kWgRows] = {};
+Obj   g_wg_title[kWgRows] = {}, g_wg_value[kWgRows] = {}, g_wg_sub[kWgRows] = {};
+Obj   g_wg_dot[kWgRows][kDots] = {};
+Obj   g_wg_shine[kWgRows] = {};          // v0.5.2: a band of light that crosses each tile now and then
+float g_wg_bx[kWgRows] = {}, g_wg_by[kWgRows] = {}; // tile place from the layout (before the float)
+bool  g_wg_clip = false;                 // tiles clip their children (needed for the shine)
+Obj   g_wg_seg[kSegs] = {};
+Obj   g_wg_colon[2] = {};
+bool  g_wg_present[kWgRows] = {};
 float g_wg_row_col[kWgRows][3] = {};
-Obj   g_wg_title[kWgRows] = {};
-Obj   g_wg_value[kWgRows] = {};
-Obj   g_wg_dot[kWgRows]   = {};
+int   g_wg_pct[kWgRows] = {-2, -2, -2, -2, -2, -2};
+char  g_wg_main[kWgRows][64] = {};
+char  g_wg_small[kWgRows][100] = {};
+int   g_wg_alt[kWgRows] = {};
+long  g_wg_alt_next[kWgRows] = {};
+long  g_wg_val_t[kWgRows] = {};
+char  g_wg_clock_shown[8] = "";
 bool  g_wg_failed      = false;
 int   g_wg_shown_seq   = -1;
-int   g_wg_rows_built  = 0;
-const float kWgW = 520.0f, kWgX = 1920.0f - 64.0f - 520.0f, kWgRowH = 50.0f, kWgPad = 22.0f;
-const float kWgAccent[kWgRows][3] = {{0.13f, 0.72f, 1.0f}, {1.0f, 0.42f, 0.30f}, {0.66f, 0.33f, 0.97f}, {0.20f, 0.95f, 0.55f}};
+int   g_wg_rows_built  = 0; // tiles on screen
+const float kWgValueX = 14.0f;
+const float kRingCX   = 50.0f; // ring centre inside a gauge tile
+const float kWgAccent[kWgRows][3] = {{0.13f, 0.72f, 1.0f}, {0.66f, 0.33f, 0.97f}, {1.0f, 0.60f, 0.24f}, {0.18f, 0.90f, 0.71f}, {0.66f, 0.33f, 0.97f}, {0.13f, 0.72f, 1.0f}};
+const float kWgSecond[kWgRows][3] = {{1, 1, 1}, {1, 1, 1}, {1, 1, 1}, {1.0f, 0.60f, 0.24f}, {1.0f, 0.30f, 0.43f}, {1.0f, 0.24f, 0.60f}};
 
 Obj wg_panel(Obj parent, float x, float y, float w, float h, void* color, const char* what) {
 	Obj ctor  = mono_class_get_method_from_name(g_dim_class, ".ctor", 0);
@@ -1872,8 +1940,9 @@ Obj wg_panel(Obj parent, float x, float y, float w, float h, void* color, const 
 		bool on = true;
 		property_set(g_dim_class, panel, "BackgroundVisibility", &on);
 	}
-	if (color != nullptr) {
-		property_set(g_dim_class, panel, g_dim_prop, color);
+	void* col = color != nullptr ? color : tint_q(0.0f, 0.0f, 0.0f, 0.0f);
+	if (col != nullptr) {
+		property_set(g_dim_class, panel, g_dim_prop, col);
 	}
 	void* child[1] = {panel};
 	invoke(find_method_up(g_ui3_widget, "AppendChild", 1), parent, child, "AppendChild(widget)");
@@ -1881,7 +1950,7 @@ Obj wg_panel(Obj parent, float x, float y, float w, float h, void* color, const 
 }
 
 void wg_round(Obj w, float radius) {
-	if (has_setter(g_ui3_widget, "BorderRadius")) {
+	if (w != nullptr && has_setter(g_ui3_widget, "BorderRadius")) {
 		property_set(g_ui3_widget, w, "BorderRadius", &radius);
 	}
 }
@@ -1896,13 +1965,50 @@ Obj wg_label(Obj parent, float x, float y, float w, float h, float r, float g, f
 	property_set(g_ui3_widget, label, "Y", &y);
 	property_set(g_ui3_widget, label, "Width", &w);
 	property_set(g_ui3_widget, label, "Height", &h);
-	void* col = tint(r, g, b, 1.0f);
+	void* col = tint_q(r, g, b, 1.0f);
 	if (col != nullptr) {
 		property_set(g_wg_label_class, label, "TextColor", col);
 	}
 	void* child[1] = {label};
 	invoke(find_method_up(g_ui3_widget, "AppendChild", 1), parent, child, "AppendChild(label)");
 	return label;
+}
+
+void wg_text(Obj label, const char* text) {
+	if (label == nullptr) return;
+	Obj str = mono_string_new(g_domain, text);
+	property_set(g_wg_label_class, label, "Text", str);
+}
+
+void wg_visible(Obj w, bool on) {
+	if (w != nullptr) property_set(g_ui3_widget, w, "Visible", &on);
+}
+
+void wg_rect(Obj w, float x, float y, float ww, float hh) {
+	if (w == nullptr) return;
+	property_set(g_ui3_widget, w, "X", &x);
+	property_set(g_ui3_widget, w, "Y", &y);
+	property_set(g_ui3_widget, w, "Width", &ww);
+	property_set(g_ui3_widget, w, "Height", &hh);
+}
+
+void wg_opacity(Obj w, float o) {
+	if (w != nullptr) property_set(g_ui3_widget, w, "Opacity", &o);
+}
+
+// 7-segment digit d (0..3) at x: segments a b c d e f g, 30 x 58, 6 px thick.
+const float kDigX[4] = {14.0f, 41.0f, 80.0f, 107.0f};
+void seg_rect(int d, int s, float& x, float& y, float& w, float& h) {
+	const float X = kDigX[d], Y = 17.0f, W = 22.0f, H = 44.0f, T = 4.5f, V = H / 2 - T * 1.5f;
+	switch (s) {
+	case 0: x = X + T, y = Y, w = W - 2 * T, h = T; break;                  // a
+	case 1: x = X + W - T, y = Y + T, w = T, h = V; break;                  // b
+	case 2: x = X + W - T, y = Y + H / 2 + T / 2, w = T, h = V; break;      // c
+	case 3: x = X + T, y = Y + H - T, w = W - 2 * T, h = T; break;          // d
+	case 4: x = X, y = Y + H / 2 + T / 2, w = T, h = V; break;              // e
+	case 5: x = X, y = Y + T, w = T, h = V; break;                          // f
+	default: x = X + T, y = Y + H / 2 - T / 2, w = W - 2 * T, h = T; break; // g
+	}
 }
 
 bool wg_build() {
@@ -1928,66 +2034,97 @@ bool wg_build() {
 	if (g_wg_label_class == nullptr) {
 		return false;
 	}
-	log_properties(g_wg_label_class, "widgets Label");
-	g_wg_halo = wg_panel(g_dim_panel, kWgX - 6.0f, 794.0f, kWgW + 12.0f, 212.0f, tint(0.13f, 0.72f, 1.0f, 0.16f), "widget halo");
-	if (g_wg_halo != nullptr) wg_round(g_wg_halo, 32.0f);
-	g_wg_card = wg_panel(g_dim_panel, kWgX, 800.0f, kWgW, 200.0f, tint(0.03f, 0.04f, 0.09f, 0.66f), "widget card");
+	fx_root(); // weather layer first: the board is appended after it and stays on top
+	g_wg_card = wg_panel(g_dim_panel, 1230.0f, 830.0f, 626.0f, 178.0f, nullptr, "widget board");
 	if (g_wg_card == nullptr) {
 		return false;
 	}
-	wg_round(g_wg_card, 26.0f);
-	// Neon outline: one glow strip + one core line per side, inset past the rounded corners.
-	// Sizes are set in wg_layout(); colors animate in wg_neon().
-	for (int i = 0; i < kWgEdges; ++i) {
-		g_wg_edge[i] = wg_panel(g_wg_card, 0.0f, 0.0f, 1.0f, 1.0f, nullptr, "widget edge");
-		if (g_wg_edge[i] != nullptr) wg_round(g_wg_edge[i], (i & 1) ? 1.0f : 4.0f);
+	// Siblings in drawing order: every glow, then every rim, then the glass tiles on top.
+	for (int i = 0; i < kWgRows; ++i) {
+		g_wg_glow[i] = wg_panel(g_wg_card, 0, 0, kSlot[i].w + 8, kSlot[i].h + 8, nullptr, "widget glow");
+		wg_round(g_wg_glow[i], 16.0f);
 	}
 	for (int i = 0; i < kWgRows; ++i) {
-		const float y = kWgPad + i * kWgRowH;
-		g_wg_dot[i]   = wg_panel(g_wg_card, 24.0f, y + 17.0f, 10.0f, 10.0f,
-		                         tint(kWgAccent[i][0], kWgAccent[i][1], kWgAccent[i][2], 1.0f), "widget dot");
-		if (g_wg_dot[i] != nullptr) wg_round(g_wg_dot[i], 5.0f);
-		g_wg_title[i] = wg_label(g_wg_card, 46.0f, y, 170.0f, 44.0f, kWgAccent[i][0], kWgAccent[i][1], kWgAccent[i][2]);
-		g_wg_value[i] = wg_label(g_wg_card, 220.0f, y, kWgW - 240.0f, 44.0f, 0.95f, 0.96f, 1.0f);
+		g_wg_rim[i] = wg_panel(g_wg_card, 0, 0, kSlot[i].w + 4, kSlot[i].h + 4, nullptr, "widget rim");
+		wg_round(g_wg_rim[i], 14.0f);
 	}
-	Obj font = g_wg_value[0] != nullptr ? property_get(g_wg_label_class, g_wg_value[0], "Font") : nullptr;
-	if (font != nullptr && mono_object_get_class != nullptr) {
-		log_properties(mono_object_get_class(font), "widgets Font");
+	void* off = tint_q(1.0f, 1.0f, 1.0f, 0.08f);
+	for (int i = 0; i < kWgRows; ++i) {
+		const Slot& sl = kSlot[i];
+		g_wg_tile[i]   = wg_panel(g_wg_card, 0, 0, sl.w, sl.h, tint_q(0.03f, 0.04f, 0.11f, 0.86f), "widget tile");
+		if (g_wg_tile[i] == nullptr) return false;
+		wg_round(g_wg_tile[i], 12.0f);
+		if (i == 0) g_wg_clip = has_setter(g_ui3_widget, "ClipChildren");
+		if (g_wg_clip) { // only when the tile can clip it: otherwise the band would show outside
+			bool on = true;
+			property_set(g_ui3_widget, g_wg_tile[i], "ClipChildren", &on);
+			g_wg_shine[i] = wg_panel(g_wg_tile[i], -60.0f, 0.0f, 34.0f, sl.h, tint_q(1.0f, 1.0f, 1.0f, 0.09f), "widget shine");
+		}
+		const float* a = kWgAccent[i];
+		if (sl.type == kClock) {
+			for (int d = 0; d < 4; ++d) {
+				for (int s = 0; s < 7; ++s) {
+					float x, y, w, h;
+					seg_rect(d, s, x, y, w, h);
+					g_wg_seg[d * 7 + s] = wg_panel(g_wg_tile[i], x, y, w, h, off, "clock segment");
+					wg_round(g_wg_seg[d * 7 + s], 2.0f);
+				}
+			}
+			g_wg_colon[0] = wg_panel(g_wg_tile[i], 68.0f, 30.0f, 5.0f, 5.0f, nullptr, "clock colon");
+			g_wg_colon[1] = wg_panel(g_wg_tile[i], 68.0f, 45.0f, 5.0f, 5.0f, nullptr, "clock colon");
+			wg_round(g_wg_colon[0], 2.0f);
+			wg_round(g_wg_colon[1], 2.0f);
+			g_wg_title[i] = wg_label(g_wg_tile[i], 140.0f, 4.0f, sl.w - 142.0f, 34.0f, 0.93f, 0.94f, 1.0f);  // "sáb 31"
+			g_wg_value[i] = wg_label(g_wg_tile[i], 140.0f, 38.0f, sl.w - 142.0f, 34.0f, 0.60f, 0.64f, 0.78f); // "oct"
+		} else if (sl.type == kGauge) {
+			const float cx = kRingCX, cy = 46.0f, r = 34.0f;
+			for (int k = 0; k < kDots; ++k) {
+				const float ang = (135.0f + 270.0f * k / (kDots - 1)) * 3.14159265f / 180.0f;
+				g_wg_dot[i][k]  = wg_panel(g_wg_tile[i], cx + r * cosf(ang) - 3.5f, cy + r * sinf(ang) - 3.5f, 7.0f, 7.0f, off, "gauge dot");
+				wg_round(g_wg_dot[i][k], 3.5f);
+			}
+			g_wg_value[i] = wg_label(g_wg_tile[i], 14.0f, 30.0f, 84.0f, 34.0f, 0.97f, 0.97f, 1.0f); // inside the ring
+			g_wg_title[i] = wg_label(g_wg_tile[i], 96.0f, 10.0f, sl.w - 100.0f, 34.0f, a[0], a[1], a[2]);
+			g_wg_sub[i]   = wg_label(g_wg_tile[i], 96.0f, 46.0f, sl.w - 100.0f, 34.0f, 0.60f, 0.64f, 0.78f);
+		} else {
+			g_wg_title[i] = wg_label(g_wg_tile[i], 14.0f, 4.0f, sl.w - 20.0f, 34.0f, a[0], a[1], a[2]);
+			g_wg_value[i] = wg_label(g_wg_tile[i], kWgValueX, 38.0f, sl.w - 20.0f, 34.0f, 0.97f, 0.97f, 1.0f);
+		}
+		wg_visible(g_wg_glow[i], false);
+		wg_visible(g_wg_rim[i], false);
+		wg_visible(g_wg_tile[i], false);
 	}
-	wp_log("widgets: card built");
+	wp_log("widgets: dashboard built (shine %s)", g_wg_clip ? "on" : "off: no ClipChildren");
 	return true;
 }
 
-void wg_text(Obj label, const char* text) {
-	if (label == nullptr) return;
-	Obj str = mono_string_new(g_domain, text);
-	property_set(g_wg_label_class, label, "Text", str);
-}
-
-void wg_visible(Obj w, bool on) {
-	if (w != nullptr) property_set(g_ui3_widget, w, "Visible", &on);
-}
-
-void wg_rect(Obj w, float x, float y, float ww, float hh) {
-	if (w == nullptr) return;
-	property_set(g_ui3_widget, w, "X", &x);
-	property_set(g_ui3_widget, w, "Y", &y);
-	property_set(g_ui3_widget, w, "Width", &ww);
-	property_set(g_ui3_widget, w, "Height", &hh);
-}
-
-// Outline geometry for a card of height h (edges are children of the card).
-void wg_layout(float h) {
-	const float r = 22.0f; // keep clear of the rounded corners
-	// top, bottom, left, right; even index = glow (6 px), odd = core (2 px)
-	wg_rect(g_wg_edge[0], r, -2.0f, kWgW - 2 * r, 6.0f);
-	wg_rect(g_wg_edge[1], r, 0.0f, kWgW - 2 * r, 2.0f);
-	wg_rect(g_wg_edge[2], r, h - 4.0f, kWgW - 2 * r, 6.0f);
-	wg_rect(g_wg_edge[3], r, h - 2.0f, kWgW - 2 * r, 2.0f);
-	wg_rect(g_wg_edge[4], -2.0f, r, 6.0f, h - 2 * r);
-	wg_rect(g_wg_edge[5], 0.0f, r, 2.0f, h - 2 * r);
-	wg_rect(g_wg_edge[6], kWgW - 4.0f, r, 6.0f, h - 2 * r);
-	wg_rect(g_wg_edge[7], kWgW - 2.0f, r, 2.0f, h - 2 * r);
+// Rows right-aligned and equally wide; a turned-off tile closes up its row. Returns the height.
+float wg_layout(float& width) {
+	float rw[2] = {0, 0};
+	int   rn[2] = {0, 0};
+	for (int i = 0; i < kWgRows; ++i) {
+		if (!g_wg_present[i]) continue;
+		rw[kSlot[i].row] += (rn[kSlot[i].row]++ ? kWgGap : 0.0f) + kSlot[i].w;
+	}
+	width = rw[0] > rw[1] ? rw[0] : rw[1];
+	const float row_y[2] = {0.0f, rn[0] > 0 ? kRowTopH + kWgGap : 0.0f};
+	float       at[2]    = {width - rw[0], width - rw[1]};
+	for (int i = 0; i < kWgRows; ++i) {
+		const bool show = g_wg_present[i];
+		wg_visible(g_wg_glow[i], show);
+		wg_visible(g_wg_rim[i], show);
+		wg_visible(g_wg_tile[i], show);
+		if (!show) continue;
+		const Slot& sl = kSlot[i];
+		const float x = at[sl.row], y = row_y[sl.row];
+		at[sl.row] += sl.w + kWgGap;
+		g_wg_bx[i] = x;
+		g_wg_by[i] = y;
+		wg_rect(g_wg_glow[i], x - 4.0f, y - 4.0f, sl.w + 8.0f, sl.h + 8.0f);
+		wg_rect(g_wg_rim[i], x - 2.0f, y - 2.0f, sl.w + 4.0f, sl.h + 4.0f);
+		wg_rect(g_wg_tile[i], x, y, sl.w, sl.h);
+	}
+	return rn[1] > 0 ? row_y[1] + kRowBotH : rn[0] > 0 ? kRowTopH : 0.0f;
 }
 
 // Outline styles (from the payload): wave | neon | rainbow | follow | fixed | breathe | off.
@@ -2056,37 +2193,34 @@ void wg_along(float p, float* c) {
 	for (int k = 0; k < 3; ++k) c[k] = g_wg_cols[i][k] + (g_wg_cols[j][k] - g_wg_cols[i][k]) * f;
 }
 
-// Animate the outline (called every few frames while the card is on).
+// Rims and glows. The outline style decides their colour; with "follow"/"fixed" etc. every tile shares
+// it, with wave / rainbow the colour travels from tile to tile. Each tile keeps its own colour in the
+// "neon" default (its data colour), like the mock-up.
 void wg_neon() {
 	if (g_wg_card == nullptr) return;
 	const bool still = g_wg_style == kWgFixed || g_wg_style == kWgOff;
 	if (still && g_wg_static_done) return;
 	if (g_wg_t0 == 0) g_wg_t0 = now_ms();
 	const float t = (now_ms() - g_wg_t0) / 1000.0f;
-	// clockwise: top, right, bottom, left -> edge pairs 0/1, 6/7, 2/3, 4/5
-	static const float kPhase[kWgEdges] = {0.0f, 0.0f, 0.5f, 0.5f, 0.75f, 0.75f, 0.25f, 0.25f};
 	float pulse = 1.0f;
-	if (g_wg_style == kWgNeonS || g_wg_style == kWgFollow) pulse = 0.55f + 0.45f * (0.5f + 0.5f * sinf(t * 1.05f));
+	if (g_wg_style == kWgNeonS || g_wg_style == kWgFollow) pulse = 0.70f + 0.30f * (0.5f + 0.5f * sinf(t * 1.05f));
 	if (g_wg_style == kWgBreathe) pulse = 0.15f + 0.85f * (0.5f - 0.5f * cosf(t * 1.9f));
-	float halo[3] = {0, 0, 0};
-	for (int i = 0; i < kWgEdges; ++i) {
-		if (g_wg_edge[i] == nullptr) continue;
-		float c[3];
+	for (int i = 0; i < kWgRows; ++i) {
+		if (!g_wg_present[i]) continue;
+		const float ph = (i % 3) / 6.0f + kSlot[i].row / 12.0f;
+		float       c[3];
 		switch (g_wg_style) {
-		case kWgWave: wg_along(t / (2.6f * (g_wg_ncols > 0 ? g_wg_ncols : 1)) + kPhase[i], c); break;
-		case kWgRainbow: wg_hsv(t / 8.0f + kPhase[i], c); break;
-		case kWgNeonS: wg_along(t / 18.0f, c); break;
+		case kWgWave: wg_along(t / (2.6f * (g_wg_ncols > 0 ? g_wg_ncols : 1)) + ph, c); break;
+		case kWgRainbow: wg_hsv(t / 8.0f + ph, c); break;
+		case kWgNeonS: memcpy(c, g_wg_row_col[i], sizeof(c)); break;
 		default: memcpy(c, g_wg_cols[0], sizeof(c)); break;
 		}
-		if (i == 0) memcpy(halo, c, sizeof(halo));
-		const bool  core  = (i & 1) != 0;
-		const float alpha = g_wg_style == kWgOff ? 0.0f : core ? 0.35f + 0.65f * pulse : 0.10f + 0.30f * pulse;
-		void*       col   = tint(c[0], c[1], c[2], alpha);
-		if (col != nullptr) property_set(g_dim_class, g_wg_edge[i], g_dim_prop, col);
-	}
-	if (g_wg_halo != nullptr) {
-		void* col = tint(halo[0], halo[1], halo[2], g_wg_style == kWgOff ? 0.0f : 0.05f + 0.11f * pulse);
-		if (col != nullptr) property_set(g_dim_class, g_wg_halo, g_dim_prop, col);
+		const float rim  = g_wg_style == kWgOff ? 0.10f : 0.45f + 0.55f * pulse;
+		const float glow = g_wg_style == kWgOff ? 0.0f : 0.05f + 0.13f * pulse;
+		void*       rc   = tint_q(c[0], c[1], c[2], rim);
+		void*       gc   = tint_q(c[0], c[1], c[2], glow);
+		if (rc != nullptr) property_set(g_dim_class, g_wg_rim[i], g_dim_prop, rc);
+		if (gc != nullptr) property_set(g_dim_class, g_wg_glow[i], g_dim_prop, gc);
 	}
 	g_wg_static_done = 1;
 }
@@ -2188,89 +2322,143 @@ void battery_poll() {
 	to_payload('B', msg, strlen(msg));
 }
 
-// ---- widget motion: values slide in, rows alternate (temp/sky <-> place...), dots pulse, card rises
-struct WgRowAnim {
-	char alt[3][100];
-	int  nalt   = 0;
-	int  cur    = 0;
-	long t_start = 0;
-	long t_next  = 0;
-	bool active  = false;
-};
-WgRowAnim g_wg_ra[kWgRows];
-long      g_wg_card_t  = 0;
-float     g_wg_card_y  = 0;
-bool      g_wg_card_on = false;
-const float kWgValueX  = 220.0f;
+// ---- dashboard motion: rises in, values slide in and alternate, rings fill with a running light ----
+long  g_wg_card_t  = 0;
+float g_wg_card_y  = 0;
+bool  g_wg_card_on = false;
 
-void wg_opacity(Obj w, float o) {
-	if (w != nullptr) property_set(g_ui3_widget, w, "Opacity", &o);
+// 7-segment clock "HH:MM" (or "H:MM"): lit segments in the tile colour, the rest faint glass.
+void wg_clock(int i, const char* hhmm) {
+	if (strcmp(hhmm, g_wg_clock_shown) == 0) return;
+	snprintf(g_wg_clock_shown, sizeof(g_wg_clock_shown), "%s", hhmm);
+	static const uint8_t kMask[10] = {0x3f, 0x06, 0x5b, 0x4f, 0x66, 0x6d, 0x7d, 0x07, 0x7f, 0x6f}; // bits a..g
+	char d[4] = {' ', ' ', ' ', ' '};
+	int  n    = 0;
+	for (const char* p = hhmm; *p != 0 && n < 4; ++p) {
+		if (*p >= '0' && *p <= '9') d[n++] = *p;
+	}
+	if (n == 3) { // "9:41" -> blank first digit
+		d[3] = d[2], d[2] = d[1], d[1] = d[0], d[0] = ' ';
+	}
+	const float* c   = g_wg_row_col[i];
+	void*        on  = tint_q(c[0], c[1], c[2], 1.0f);
+	void*        off = tint_q(1.0f, 1.0f, 1.0f, 0.07f);
+	for (int k = 0; k < 4; ++k) {
+		const uint8_t m = d[k] >= '0' && d[k] <= '9' ? kMask[d[k] - '0'] : 0;
+		for (int s = 0; s < 7; ++s) {
+			void* col = (m >> s) & 1 ? on : off; // bit 0 = a, 1 = b, ... 6 = g (same order as seg_rect)
+			if (col != nullptr) property_set(g_dim_class, g_wg_seg[k * 7 + s], g_dim_prop, col);
+		}
+	}
+	for (Obj o : g_wg_colon) {
+		if (on != nullptr) property_set(g_dim_class, o, g_dim_prop, on);
+	}
 }
 
-void wg_row_value(int i, const char* value) {
-	WgRowAnim& r = g_wg_ra[i];
-	char       a[3][100] = {};
-	int        n = 0;
-	const char* p = value;
-	while (n < 3) {
-		const char* sep = strchr(p, '\x1f');
-		const size_t len = sep != nullptr ? static_cast<size_t>(sep - p) : strlen(p);
-		snprintf(a[n++], sizeof(a[0]), "%.*s", static_cast<int>(len < 99 ? len : 99), p);
-		if (sep == nullptr) break;
-		p = sep + 1;
+// Ring gauge: dots lit up to pct, blending from the tile colour to its second colour.
+void wg_ring(int i, int pct) {
+	if (pct == g_wg_pct[i]) return;
+	g_wg_pct[i]   = pct;
+	const int lit = pct < 0 ? 0 : (pct * kDots + 50) / 100;
+	const float *a = g_wg_row_col[i], *b = kWgSecond[i];
+	for (int k = 0; k < kDots; ++k) {
+		const float t   = static_cast<float>(k) / (kDots - 1);
+		void*       col = k < lit ? tint_q(a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t, 1.0f)
+		                          : tint_q(1.0f, 1.0f, 1.0f, 0.10f);
+		if (col != nullptr) property_set(g_dim_class, g_wg_dot[i][k], g_dim_prop, col);
 	}
-	if (n == r.nalt && memcmp(a, r.alt, sizeof(a)) == 0) return; // same data: keep the rhythm
-	const bool first_text_same = r.nalt > 0 && strcmp(a[0], r.alt[r.cur]) == 0;
-	memcpy(r.alt, a, sizeof(a));
-	r.nalt = n;
-	r.cur  = 0;
-	const long now = now_ms();
-	r.t_next = now + 7000 + i * 900; // stagger the rows
-	if (first_text_same) return;
-	wg_text(g_wg_value[i], r.alt[0]);
-	r.t_start = now;
-	r.active  = true;
+}
+
+// The value inside a ring, roughly centred (PS5 system font: ~14 px per character, from a photo of
+// the v0.5 board: "Iztapalapa" ~139 px).
+void wg_ring_value(int i, const char* v) {
+	const float w = 14.5f * static_cast<float>(strlen(v) - (strstr(v, "°") != nullptr ? 1 : 0));
+	float       x = kRingCX - w * 0.5f;
+	property_set(g_ui3_widget, g_wg_value[i], "X", &x);
+	wg_text(g_wg_value[i], v);
 }
 
 void wg_anim() {
 	if (g_wg_card == nullptr || !g_wg_card_on) return;
 	const long now = now_ms();
 	auto ease = [](float p) { p = p < 0 ? 0 : p > 1 ? 1 : p; return 1.0f - (1.0f - p) * (1.0f - p) * (1.0f - p); };
-	if (g_wg_card_t != 0) { // the card rises into place
-		const float e = ease((now - g_wg_card_t) / 650.0f);
-		const float y = g_wg_card_y + 46.0f * (1.0f - e);
+	if (g_wg_card_t != 0) { // the board rises into place
+		const float e = ease((now - g_wg_card_t) / 700.0f);
+		const float y = g_wg_card_y + 40.0f * (1.0f - e);
 		property_set(g_ui3_widget, g_wg_card, "Y", const_cast<float*>(&y));
-		const float hy = y - 6.0f;
-		if (g_wg_halo != nullptr) property_set(g_ui3_widget, g_wg_halo, "Y", const_cast<float*>(&hy));
 		wg_opacity(g_wg_card, e);
-		wg_opacity(g_wg_halo, e);
 		if (e >= 1.0f) g_wg_card_t = 0;
 	}
+	for (int i = 0; i < kWgRows; ++i) { // text tiles: value <-> small line, staggered
+		if (!g_wg_present[i] || kSlot[i].type != kText || g_wg_alt_next[i] == 0 || now < g_wg_alt_next[i]) continue;
+		const bool has_small = g_wg_small[i][0] != 0;
+		g_wg_alt[i]          = has_small && g_wg_alt[i] == 0 ? 1 : 0;
+		g_wg_alt_next[i]     = now + (g_wg_alt[i] == 0 ? 6000 : 3500);
+		if (!has_small) continue;
+		wg_text(g_wg_value[i], g_wg_alt[i] ? g_wg_small[i] : g_wg_main[i]);
+		g_wg_val_t[i] = now;
+	}
+	for (int i = 0; i < kWgRows; ++i) { // gauge small line with two halves ("184 GB" / "libres")
+		if (!g_wg_present[i] || kSlot[i].type != kGauge || g_wg_alt_next[i] == 0 || now < g_wg_alt_next[i]) continue;
+		const char* rs = strchr(g_wg_small[i], '\x1e');
+		if (rs == nullptr) continue;
+		g_wg_alt[i]      = g_wg_alt[i] == 0 ? 1 : 0;
+		g_wg_alt_next[i] = now + (g_wg_alt[i] == 0 ? 4000 : 2500);
+		char part[100];
+		if (g_wg_alt[i] == 0) snprintf(part, sizeof(part), "%.*s", static_cast<int>(rs - g_wg_small[i]), g_wg_small[i]);
+		else snprintf(part, sizeof(part), "%s", rs + 1);
+		wg_text(g_wg_sub[i], part);
+	}
 	for (int i = 0; i < kWgRows; ++i) {
-		WgRowAnim& r = g_wg_ra[i];
-		if (r.nalt == 0) continue;
-		if (r.nalt > 1 && now >= r.t_next) {
-			r.cur     = (r.cur + 1) % r.nalt;
-			r.t_next  = now + (r.cur == 0 ? 7000 : 4000);
-			r.t_start = now;
-			r.active  = true;
-			wg_text(g_wg_value[i], r.alt[r.cur]);
+		if (g_wg_val_t[i] == 0) continue;
+		const float e = ease((now - g_wg_val_t[i]) / 480.0f);
+		const float x = kWgValueX + 24.0f * (1.0f - e);
+		property_set(g_ui3_widget, g_wg_value[i], "X", const_cast<float*>(&x));
+		wg_opacity(g_wg_value[i], e);
+		if (e >= 1.0f) g_wg_val_t[i] = 0;
+	}
+	// v0.5.2: the tiles float gently, one after another like a wave (3 px), and a band of light
+	// crosses each tile's glass every few seconds, tile after tile
+	for (int i = 0; i < kWgRows; ++i) {
+		if (!g_wg_present[i]) continue;
+		const float off = 3.0f * sinf(now / 900.0f - i * 0.8f);
+		const float y   = g_wg_by[i] + off;
+		const float gy = y - 4.0f, ry = y - 2.0f;
+		property_set(g_ui3_widget, g_wg_tile[i], "Y", const_cast<float*>(&y));
+		property_set(g_ui3_widget, g_wg_rim[i], "Y", const_cast<float*>(&ry));
+		property_set(g_ui3_widget, g_wg_glow[i], "Y", const_cast<float*>(&gy));
+		if (g_wg_shine[i] != nullptr) {
+			const long  cycle = 7000, start = (now + i * 450) % cycle; // 0.45 s apart
+			const float e     = start < 900 ? start / 900.0f : -1.0f;
+			const float sx    = e < 0 ? -60.0f : -40.0f + (kSlot[i].w + 80.0f) * (e * e * (3 - 2 * e));
+			property_set(g_ui3_widget, g_wg_shine[i], "X", const_cast<float*>(&sx));
 		}
-		if (r.active) {
-			const float e = ease((now - r.t_start) / 480.0f);
-			const float x = kWgValueX + 28.0f * (1.0f - e);
-			property_set(g_ui3_widget, g_wg_value[i], "X", const_cast<float*>(&x));
-			wg_opacity(g_wg_value[i], e);
-			if (e >= 1.0f) r.active = false;
+	}
+	// clock colon blinks; a light runs round each ring's lit dots
+	const bool colon = (now / 1000) % 2 == 0;
+	static int colon_shown = -1;
+	if (colon != colon_shown) {
+		colon_shown = colon;
+		for (Obj o : g_wg_colon) wg_opacity(o, colon ? 1.0f : 0.25f);
+	}
+	const int pos = static_cast<int>((now / 70) % 48);
+	static int last_pos = -1;
+	if (pos != last_pos) {
+		last_pos = pos;
+		for (int i = 0; i < kWgRows; ++i) {
+			if (!g_wg_present[i] || kSlot[i].type != kGauge || g_wg_pct[i] < 0) continue;
+			const int lit = (g_wg_pct[i] * kDots + 50) / 100;
+			for (int k = 0; k < lit; ++k) {
+				const int d = pos - k - i * 3;
+				wg_opacity(g_wg_dot[i][k], d >= 0 && d < 3 ? 0.45f + 0.18f * d : 1.0f);
+			}
 		}
-		// dots breathe one after another, like a slow wave down the card
-		wg_opacity(g_wg_dot[i], 0.45f + 0.55f * (0.5f + 0.5f * sinf(now / 520.0f - i * 0.9f)));
 	}
 }
 
 void widgets_tick() {
 	if (g_wg_text[0] == '1') {
-		// first read ~8 s after the card is on, then every ~30 s (tick = 15 frames)
+		// first read ~8 s after the board is on, then every ~30 s (tick = 15 frames)
 		if (g_bat_tick++ % 120 == 32) battery_poll();
 	}
 	const int seq = g_wg_seq.load();
@@ -2299,7 +2487,7 @@ void widgets_tick() {
 		snprintf(head, sizeof(head), "%.*s", static_cast<int>(hl < sizeof(head) ? hl : sizeof(head) - 1), text);
 		wg_parse_style(head);
 	}
-	// Fields after the head: "RRGGBB|title", value, ...
+	// Fields after the head: "RRGGBB|title|pct|kind", "main\x1fsmall", ...
 	const char* f[kWgRows * 2] = {};
 	int         nf = 0;
 	char*       p  = strchr(text, '\t');
@@ -2308,58 +2496,710 @@ void widgets_tick() {
 		f[nf++] = p + 1;
 		p       = strchr(p + 1, '\t');
 	}
-	const int rows = nf / 2;
-	for (int i = 0; i < kWgRows; ++i) {
-		const bool show = on && i < rows;
-		wg_visible(g_wg_dot[i], show);
-		wg_visible(g_wg_title[i], show);
-		wg_visible(g_wg_value[i], show);
-		if (!show) g_wg_ra[i].nalt = 0; // animate again when it comes back
-		if (show) {
-			const char* title = f[i * 2];
-			float       c[3]  = {kWgAccent[i][0], kWgAccent[i][1], kWgAccent[i][2]};
-			if (strlen(title) > 7 && title[6] == '|') {
-				wg_hex(title, c);
-				title += 7;
+	bool present[kWgRows] = {};
+	for (int r = 0; on && r < nf / 2; ++r) {
+		char head[120];
+		snprintf(head, sizeof(head), "%s", f[r * 2]);
+		char* part[4] = {head, nullptr, nullptr, nullptr};
+		for (int k = 1; k < 4; ++k) {
+			char* bar = part[k - 1] != nullptr ? strchr(part[k - 1], '|') : nullptr;
+			if (bar != nullptr) *bar = 0, part[k] = bar + 1;
+		}
+		if (part[3] == nullptr || strlen(part[0]) != 6) continue; // older payload: no kind
+		int i = -1;
+		for (int k = 0; k < kWgRows; ++k) {
+			if (kSlot[k].kind == part[3][0]) i = k;
+		}
+		if (i < 0) continue;
+		present[i] = true;
+		float c[3];
+		wg_hex(part[0], c);
+		const bool recolor = memcmp(c, g_wg_row_col[i], sizeof(c)) != 0;
+		if (recolor) { // dynamic colour (weather, heat, battery)
+			memcpy(g_wg_row_col[i], c, sizeof(c));
+			if (kSlot[i].type != kClock) {
+				void* tc = tint_q(c[0], c[1], c[2], 1.0f);
+				if (tc != nullptr) property_set(g_wg_label_class, g_wg_title[i], "TextColor", tc);
 			}
-			if (memcmp(c, g_wg_row_col[i], sizeof(c)) != 0) { // dynamic row colour (weather, heat, battery)
-				memcpy(g_wg_row_col[i], c, sizeof(c));
-				void* dc = tint(c[0], c[1], c[2], 1.0f);
-				if (dc != nullptr && g_wg_dot[i] != nullptr) property_set(g_dim_class, g_wg_dot[i], g_dim_prop, dc);
-				void* tc = tint(c[0], c[1], c[2], 1.0f);
-				if (tc != nullptr && g_wg_title[i] != nullptr) property_set(g_wg_label_class, g_wg_title[i], "TextColor", tc);
+			g_wg_pct[i]          = -2; // repaint ring / digits in the new colour
+			g_wg_clock_shown[0]  = 0;
+			g_wg_static_done     = 0;
+		}
+		char main[64] = {}, small[100] = {};
+		const char* v   = f[r * 2 + 1];
+		const char* sep = strchr(v, '\x1f');
+		snprintf(main, sizeof(main), "%.*s", static_cast<int>(sep != nullptr ? sep - v : strlen(v)), v);
+		if (sep != nullptr) snprintf(small, sizeof(small), "%s", sep + 1);
+		const bool main_changed  = strcmp(main, g_wg_main[i]) != 0;
+		const bool small_changed = strcmp(small, g_wg_small[i]) != 0;
+		snprintf(g_wg_main[i], sizeof(g_wg_main[i]), "%s", main);
+		snprintf(g_wg_small[i], sizeof(g_wg_small[i]), "%s", small);
+		if (kSlot[i].type == kClock) {
+			wg_clock(i, main);
+			if (small_changed) { // "sáb 31 oct" -> "sáb 31" / "oct" (or "a\x1eb" from the payload)
+				char l1[64], l2[64];
+				const char* rs = strchr(small, '\x1e');
+				const char* sp = rs != nullptr ? rs : strrchr(small, ' ');
+				snprintf(l1, sizeof(l1), "%.*s", static_cast<int>(sp != nullptr ? sp - small : strlen(small)), small);
+				snprintf(l2, sizeof(l2), "%s", sp != nullptr ? sp + 1 : "");
+				wg_text(g_wg_title[i], l1);
+				wg_text(g_wg_value[i], l2);
 			}
-			wg_text(g_wg_title[i], title);
-			wg_row_value(i, f[i * 2 + 1]);
+		} else if (kSlot[i].type == kGauge) {
+			wg_text(g_wg_title[i], part[1]);
+			if (main_changed) wg_ring_value(i, main);
+			if (small_changed) { // "184 GB\x1elibres": the two halves take turns (wg_anim)
+				char first[100];
+				const char* rs = strchr(small, '\x1e');
+				snprintf(first, sizeof(first), "%.*s", static_cast<int>(rs != nullptr ? rs - small : strlen(small)), small);
+				wg_text(g_wg_sub[i], first);
+				g_wg_alt[i]      = 0;
+				g_wg_alt_next[i] = rs != nullptr ? now_ms() + 4000 : 0;
+			}
+			wg_ring(i, part[2] != nullptr && part[2][0] != 0 ? atoi(part[2]) : -1);
+		} else {
+			wg_text(g_wg_title[i], part[1]);
+			if (main_changed && g_wg_alt[i] == 0) { // what is on screen changed: show it, slide in
+				wg_text(g_wg_value[i], main);
+				g_wg_val_t[i] = now_ms();
+			}
+			if (g_wg_alt_next[i] == 0) g_wg_alt_next[i] = now_ms() + 6000 + i * 900;
 		}
 	}
-	const float h = rows > 0 ? kWgPad * 2 + rows * kWgRowH - 6.0f : 0.0f;
-	const float y = 1080.0f - 70.0f - h;
+	int rows = 0;
+	for (int i = 0; i < kWgRows; ++i) {
+		if (g_wg_present[i] != present[i]) g_wg_static_done = 0;
+		g_wg_present[i] = present[i];
+		if (!present[i]) { // animate again when it comes back
+			g_wg_main[i][0] = 0;
+			g_wg_alt[i]     = 0;
+		}
+		rows += present[i] ? 1 : 0;
+	}
+	float       w = 0;
+	const float h = wg_layout(w);
+	// v0.5.2: top right, under the PS5's own clock and icons; at the bottom Sony's hub cards
+	// (Trofeos, Amigos que juegan, the "1h" badge) were drawn over the board.
+	const float x = 1920.0f - 72.0f - w, y = 178.0f;
+	property_set(g_ui3_widget, g_wg_card, "X", const_cast<float*>(&x));
+	property_set(g_ui3_widget, g_wg_card, "Width", &w);
 	property_set(g_ui3_widget, g_wg_card, "Height", const_cast<float*>(&h));
 	g_wg_card_y = y;
-	const bool visible = on && rows > 0;
+	const bool visible = rows > 0;
 	if (visible && !g_wg_card_on) {
 		g_wg_card_t = now_ms(); // entrance
-		const float y0 = y + 46.0f;
+		const float y0 = y + 40.0f;
 		property_set(g_ui3_widget, g_wg_card, "Y", const_cast<float*>(&y0));
 		wg_opacity(g_wg_card, 0.0f);
-		wg_opacity(g_wg_halo, 0.0f);
 	} else if (g_wg_card_t == 0) {
 		property_set(g_ui3_widget, g_wg_card, "Y", const_cast<float*>(&y));
 	}
 	g_wg_card_on = visible;
-	wg_layout(h);
-	if (g_wg_card_t == 0) wg_rect(g_wg_halo, kWgX - 6.0f, y - 6.0f, kWgW + 12.0f, h + 12.0f);
-	else {
-		const float hw = kWgW + 12.0f, hh = h + 12.0f;
-		property_set(g_ui3_widget, g_wg_halo, "Width", const_cast<float*>(&hw));
-		property_set(g_ui3_widget, g_wg_halo, "Height", const_cast<float*>(&hh));
-	}
-	wg_visible(g_wg_halo, on && rows > 0);
-	wg_visible(g_wg_card, on && rows > 0);
+	wg_visible(g_wg_card, visible);
 	if (rows != g_wg_rows_built) {
 		g_wg_rows_built = rows;
-		wp_log("widgets: %d row(s), %s", rows, on ? "on" : "off");
+		wp_log("widgets: %d tile(s), %s", rows, on ? "on" : "off");
+	}
+}
+
+// ---- v0.5 weather effect: rain, drizzle, storm, snow or fog over the user's own wallpaper -------
+// Plain UI3 Panels like the looks, in one transparent layer under the widget card. Only positions and
+// colours change per frame (no allocations after the build); ~30 updates/s, nothing while no video
+// plays. The payload decides the kind from Open-Meteo ("C rain 1"); the wallpaper is never changed.
+constexpr int kFxMax = 40;
+Obj   g_fx_root = nullptr;
+Obj   g_fx_flash = nullptr;            // storm lightning: one full-screen white panel
+Obj   g_fx_p[kFxMax] = {};
+float g_fx_x[kFxMax], g_fx_y[kFxMax], g_fx_v[kFxMax], g_fx_len[kFxMax], g_fx_a[kFxMax], g_fx_ph[kFxMax];
+int   g_fx_built = 0;                  // particles created so far
+int   g_fx_kind = 0;                   // 0 none, 1 drizzle, 2 rain, 3 storm, 4 snow, 5 fog
+int   g_fx_level = 1;
+int   g_fx_seen = -1;
+int   g_fx_used = 0;                   // particles in use for this kind
+long  g_fx_last = 0, g_fx_next_flash = 0, g_fx_flash_t = 0;
+bool  g_fx_failed = false;
+void* g_fx_flash_col[5] = {};          // alpha 0, .05, .12, .2, .28 (built once: tint() pins a new object)
+int   g_fx_flash_shown = -1;
+uint32_t g_fx_rng = 0x9e3779b9u;
+
+float fx_rand() {
+	g_fx_rng ^= g_fx_rng << 13;
+	g_fx_rng ^= g_fx_rng >> 17;
+	g_fx_rng ^= g_fx_rng << 5;
+	return (g_fx_rng & 0xffffff) / 16777216.0f;
+}
+
+Obj fx_root() {
+	if (g_fx_root != nullptr || g_fx_failed) return g_fx_root;
+	if (g_dim_panel == nullptr && !g_dim_tried) create_dim_panel();
+	if (g_dim_panel == nullptr) {
+		g_fx_failed = true;
+		return nullptr;
+	}
+	Obj ctor = mono_class_get_method_from_name(g_dim_class, ".ctor", 0);
+	Obj root = ctor != nullptr ? construct_pinned(g_dim_class, ctor, nullptr, "fx layer") : nullptr;
+	if (root == nullptr) {
+		g_fx_failed = true;
+		return nullptr;
+	}
+	float zero = 0.0f, w = 1920.0f, h = 1080.0f;
+	property_set(g_ui3_widget, root, "X", &zero);
+	property_set(g_ui3_widget, root, "Y", &zero);
+	property_set(g_ui3_widget, root, "Width", &w);
+	property_set(g_ui3_widget, root, "Height", &h);
+	void* clear = tint(0.0f, 0.0f, 0.0f, 0.0f);
+	if (clear != nullptr) property_set(g_dim_class, root, g_dim_prop, clear);
+	if (has_setter(g_ui3_widget, "ClipChildren")) {
+		bool on = true;
+		property_set(g_ui3_widget, root, "ClipChildren", &on);
+	}
+	void* child[1] = {root};
+	if (!invoke(find_method_up(g_ui3_widget, "AppendChild", 1), g_dim_panel, child, "AppendChild(fx)")) {
+		g_fx_failed = true;
+		return nullptr;
+	}
+	g_fx_root = root;
+	wp_log("fx: layer ready");
+	return root;
+}
+
+Obj fx_panel(float x, float y, float w, float h) {
+	Obj ctor = mono_class_get_method_from_name(g_dim_class, ".ctor", 0);
+	Obj p    = ctor != nullptr ? construct_pinned(g_dim_class, ctor, nullptr, "fx particle") : nullptr;
+	if (p == nullptr) return nullptr;
+	wg_rect(p, x, y, w, h);
+	if (has_setter(g_dim_class, "BackgroundVisibility")) {
+		bool on = true;
+		property_set(g_dim_class, p, "BackgroundVisibility", &on);
+	}
+	void* clear = tint(0.0f, 0.0f, 0.0f, 0.0f);
+	if (clear != nullptr) property_set(g_dim_class, p, g_dim_prop, clear);
+	void* child[1] = {p};
+	invoke(find_method_up(g_ui3_widget, "AppendChild", 1), g_fx_root, child, "AppendChild(fx particle)");
+	return p;
+}
+
+// (Re)shape every particle for the new kind: size, colour, speed, start position.
+void fx_setup(int kind, int level) {
+	const bool strong = level >= 2;
+	int        n      = 0;
+	switch (kind) {
+	// Each particle is one property write per update on ShellUI's UI thread: keep them few.
+	case 1: n = strong ? 18 : 12; break; // drizzle
+	case 2: n = strong ? 36 : 24; break; // rain
+	case 3: n = 40; break;               // storm
+	case 4: n = strong ? 36 : 24; break; // snow
+	case 5: n = 10; break;               // fog: wide soft bands
+	default: n = 0; break;
+	}
+	if (n > 0 && g_fx_root == nullptr && fx_root() == nullptr) n = 0;
+	if (kind == 3 && g_fx_flash == nullptr && g_fx_root != nullptr) {
+		g_fx_flash = fx_panel(0.0f, 0.0f, 1920.0f, 1080.0f);
+		static const float kA[5] = {0.0f, 0.05f, 0.12f, 0.20f, 0.28f};
+		for (int i = 0; i < 5; ++i) g_fx_flash_col[i] = tint(1.0f, 1.0f, 1.0f, kA[i]);
+	}
+	while (g_fx_built < n) {
+		Obj p = fx_panel(0.0f, -100.0f, 2.0f, 2.0f);
+		if (p == nullptr) break;
+		g_fx_p[g_fx_built++] = p;
+	}
+	if (n > g_fx_built) n = g_fx_built;
+	for (int i = 0; i < g_fx_built; ++i) {
+		const bool use = i < n;
+		wg_visible(g_fx_p[i], use);
+		if (!use) continue;
+		float w, h, r = 0.80f, g = 0.88f, b = 1.0f, a;
+		g_fx_x[i]  = fx_rand() * 1920.0f;
+		g_fx_y[i]  = fx_rand() * 1080.0f;
+		g_fx_ph[i] = fx_rand() * 6.2832f;
+		if (kind == 4) { // snow: round flakes, slow, swaying
+			w = h       = 4.0f + fx_rand() * (strong ? 7.0f : 5.0f);
+			g_fx_v[i]   = 40.0f + fx_rand() * 80.0f + w * 6.0f;
+			a           = 0.55f + fx_rand() * 0.35f;
+			r = g = b   = 1.0f;
+			wg_round(g_fx_p[i], w * 0.5f);
+		} else if (kind == 5) { // fog: tall translucent bands that drift sideways
+			w           = 900.0f + fx_rand() * 700.0f;
+			h           = 120.0f + fx_rand() * 160.0f;
+			g_fx_y[i]   = 380.0f + (i * 70.0f) + fx_rand() * 40.0f;
+			g_fx_x[i]   = fx_rand() * 1920.0f - w * 0.5f;
+			g_fx_v[i]   = (8.0f + fx_rand() * 18.0f) * (i % 2 ? -1.0f : 1.0f);
+			a           = (strong ? 0.10f : 0.06f) + fx_rand() * 0.04f;
+			r = g = b   = 0.92f;
+			wg_round(g_fx_p[i], h * 0.5f);
+		} else { // drizzle / rain / storm: thin streaks
+			const float fast = kind == 1 ? 0.55f : kind == 3 ? 1.35f : 1.0f;
+			w           = kind == 1 ? 1.5f : 2.0f;
+			h           = (kind == 1 ? 18.0f : 30.0f) + fx_rand() * (kind == 1 ? 14.0f : 34.0f);
+			g_fx_v[i]   = (1300.0f + fx_rand() * 700.0f) * fast;
+			a           = (kind == 1 ? 0.22f : 0.28f) + fx_rand() * (strong ? 0.22f : 0.14f);
+			wg_round(g_fx_p[i], 1.0f);
+		}
+		g_fx_len[i] = h;
+		g_fx_a[i]   = a;
+		wg_rect(g_fx_p[i], g_fx_x[i], g_fx_y[i], w, h);
+		void* col = tint(r, g, b, a);
+		if (col != nullptr) property_set(g_dim_class, g_fx_p[i], g_dim_prop, col);
+	}
+	if (g_fx_flash != nullptr) {
+		if (g_fx_flash_col[0] != nullptr) property_set(g_dim_class, g_fx_flash, g_dim_prop, g_fx_flash_col[0]);
+		g_fx_flash_shown = 0;
+		wg_visible(g_fx_flash, kind == 3);
+	}
+	g_fx_used       = n;
+	g_fx_next_flash = now_ms() + 5000 + static_cast<long>(fx_rand() * 9000.0f);
+	g_fx_flash_t    = 0;
+}
+
+void fx_tick() {
+	const int seq = g_fx_seq.load();
+	if (seq != g_fx_seen) {
+		g_fx_seen = seq;
+		char kind[24] = {};
+		int  level    = 1;
+		sscanf(g_fx_text, "%23s %d", kind, &level);
+		static const char* const kNames[] = {"none", "drizzle", "rain", "storm", "snow", "fog"};
+		int k = 0;
+		for (int i = 0; i < 6; ++i) {
+			if (strcmp(kind, kNames[i]) == 0) k = i;
+		}
+		if (level <= 0) k = 0;
+		if (k != g_fx_kind || level != g_fx_level) {
+			if (k != 0 || g_fx_root != nullptr) fx_setup(k, level);
+			wp_log("fx: %s level %d (%d particles)", kNames[k], level, g_fx_used);
+			g_fx_kind  = k;
+			g_fx_level = level;
+		}
+		g_fx_last = 0;
+	}
+	if (g_fx_root == nullptr) return;
+	const bool show = video_active();
+	static bool shown = true;
+	if (show != shown) {
+		shown = show;
+		wg_visible(g_fx_root, show);
+	}
+	if (!show || g_fx_kind == 0 || g_fx_used == 0) {
+		g_fx_last = 0;
+		return;
+	}
+	const long now = now_ms();
+	float      dt  = g_fx_last == 0 ? 0.0f : (now - g_fx_last) / 1000.0f;
+	g_fx_last      = now;
+	if (dt > 0.1f) dt = 0.1f; // after a hitch: don't jump
+	for (int i = 0; i < g_fx_used; ++i) {
+		Obj p = g_fx_p[i];
+		if (p == nullptr) continue;
+		if (g_fx_kind == 5) { // fog drifts sideways and wraps
+			g_fx_x[i] += g_fx_v[i] * dt;
+			if (g_fx_x[i] > 1920.0f) g_fx_x[i] = -1600.0f;
+			if (g_fx_x[i] < -1600.0f) g_fx_x[i] = 1920.0f;
+			property_set(g_ui3_widget, p, "X", &g_fx_x[i]);
+			continue;
+		}
+		g_fx_y[i] += g_fx_v[i] * dt;
+		if (g_fx_kind == 4) {
+			g_fx_ph[i] += dt * 1.3f;
+			float x = g_fx_x[i] + sinf(g_fx_ph[i]) * 22.0f;
+			if (g_fx_y[i] > 1090.0f) {
+				g_fx_y[i] = -12.0f;
+				g_fx_x[i] = fx_rand() * 1920.0f;
+				x         = g_fx_x[i];
+			}
+			property_set(g_ui3_widget, p, "X", &x);
+		} else if (g_fx_y[i] > 1090.0f) {
+			g_fx_y[i] = -g_fx_len[i] - fx_rand() * 200.0f;
+			g_fx_x[i] = fx_rand() * 1920.0f;
+			property_set(g_ui3_widget, p, "X", &g_fx_x[i]);
+		}
+		property_set(g_ui3_widget, p, "Y", &g_fx_y[i]);
+	}
+	if (g_fx_kind == 3 && g_fx_flash != nullptr) { // lightning: two quick flashes, then a pause
+		if (g_fx_flash_t == 0 && now >= g_fx_next_flash) g_fx_flash_t = now;
+		if (g_fx_flash_t != 0) {
+			const long  e = now - g_fx_flash_t;
+			const float a = e < 90 ? 0.28f : e < 160 ? 0.04f : e < 260 ? 0.20f : e < 520 ? 0.20f * (1.0f - (e - 260) / 260.0f) : 0.0f;
+			const float k = a * (g_fx_level >= 2 ? 1.0f : 0.7f);
+			const int   s = k < 0.025f ? 0 : k < 0.085f ? 1 : k < 0.16f ? 2 : k < 0.24f ? 3 : 4;
+			if (s != g_fx_flash_shown && g_fx_flash_col[s] != nullptr) {
+				g_fx_flash_shown = s;
+				property_set(g_dim_class, g_fx_flash, g_dim_prop, g_fx_flash_col[s]);
+			}
+			if (e >= 520) {
+				g_fx_flash_t    = 0;
+				g_fx_next_flash = now + 6000 + static_cast<long>(fx_rand() * 12000.0f);
+			}
+		}
+	}
+}
+
+// ---- v0.5.1: find the highlighted game tile on screen ------------------------------------------
+// The home screen is a tree of UI3 widgets (LayerManager.s_root_scene). One walk adds up X/Y from the
+// root to get each widget's place on screen and picks the largest square that sits where the game
+// row is (the highlighted tile is drawn bigger than the others). Only on request ("X tiledetect",
+// the app's Detectar sola) or, once a tile class is known, on each move with a much smaller walk.
+// The best candidates go to the log so a firmware with a different layout can be matched.
+std::atomic<bool> g_tile_detect_req {false};
+char  g_tile_class[64] = "";   // class of the tile widget found by the last full detection
+struct TileCand {
+	float x, y, w, h;
+	char  cls[48];
+	char  parent[48];
+	Obj   obj;
+};
+Obj g_tile_area = nullptr; // a few levels above the tile found: only this part is walked after a move
+
+float num_prop(Obj w, const char* name) {
+	Obj v = property_get(g_ui3_widget, w, name);
+	return v != nullptr ? *static_cast<float*>(mono_object_unbox(v)) : 0.0f;
+}
+
+void tile_walk(Obj w, float ox, float oy, int depth, int& visited, TileCand* best, int& nbest, const char* parent, bool only_class) {
+	for (; w != nullptr && visited < 7000; w = property_get(g_ui3_widget, w, "NextSibling")) {
+		++visited;
+		Obj         k    = mono_object_get_class(w);
+		const char* name = k != nullptr ? mono_class_get_name(k) : "?";
+		Obj         vis  = property_get(g_ui3_widget, w, "Visible");
+		if (vis != nullptr && !unbox_bool(vis)) continue; // hidden: nothing under it shows either
+		const float x = ox + num_prop(w, "X"), y = oy + num_prop(w, "Y");
+		const float ww = num_prop(w, "Width"), hh = num_prop(w, "Height");
+		const bool  square = ww >= 120.0f && ww <= 360.0f && hh > 0 && fabsf(ww - hh) <= ww * 0.04f;
+		const bool  in_row = y >= 40.0f && y <= 620.0f && x >= -40.0f && x + ww <= 1960.0f;
+		if (square && in_row && (!only_class || strcmp(name, g_tile_class) == 0)) {
+			// keep the 8 largest
+			int slot = nbest < 8 ? nbest++ : -1;
+			if (slot < 0) {
+				int small = 0;
+				for (int i = 1; i < 8; ++i) {
+					if (best[i].w < best[small].w) small = i;
+				}
+				if (best[small].w < ww) slot = small;
+			}
+			if (slot >= 0) {
+				best[slot] = {x, y, ww, hh, {}, {}, w};
+				snprintf(best[slot].cls, sizeof(best[slot].cls), "%s", name);
+				snprintf(best[slot].parent, sizeof(best[slot].parent), "%s", parent);
+			}
+		}
+		Obj child = depth < 40 ? property_get(g_ui3_widget, w, "FirstChild") : nullptr;
+		if (child != nullptr) tile_walk(child, x, y, depth + 1, visited, best, nbest, name, only_class);
+	}
+}
+
+// Where a widget's parent sits on screen: X/Y added up the Parent chain (0,0 without one).
+bool parent_origin(Obj w, float& ox, float& oy) {
+	ox = oy = 0.0f;
+	static int has_parent = -1;
+	if (has_parent < 0) has_parent = mono_class_get_property_from_name(g_ui3_widget, "Parent") != nullptr ? 1 : 0;
+	if (!has_parent) return false;
+	Obj p = property_get(g_ui3_widget, w, "Parent");
+	for (int depth = 0; p != nullptr && depth < 60; ++depth) {
+		ox += num_prop(p, "X");
+		oy += num_prop(p, "Y");
+		p = property_get(g_ui3_widget, p, "Parent");
+	}
+	return true;
+}
+
+// After a move: walk only the row (g_tile_area and its siblings), at most a few hundred widgets.
+bool tile_follow(float& tx, float& ty, float& ts) {
+	float ox, oy;
+	if (g_tile_area == nullptr || !parent_origin(g_tile_area, ox, oy)) return false;
+	TileCand best[8];
+	int      nbest = 0, visited = 6200; // budget: 800 widgets
+	tile_walk(g_tile_area, ox, oy, 0, visited, best, nbest, "-", true);
+	int pick = -1;
+	for (int i = 0; i < nbest; ++i) {
+		if (pick < 0 || best[i].w > best[pick].w) pick = i;
+	}
+	if (pick < 0) return false;
+	tx = best[pick].x, ty = best[pick].y, ts = best[pick].w;
+	return true;
+}
+
+// Returns true and the tile's place when one stands out.
+bool tile_detect(float& tx, float& ty, float& ts, bool log_all) {
+	Obj lm    = find_class("Sce.Vsh.ShellUI.AppSystem", "LayerManager");
+	Obj field = lm != nullptr ? mono_class_get_field_from_name(lm, "s_root_scene") : nullptr;
+	Obj vt    = lm != nullptr && mono_class_vtable != nullptr ? mono_class_vtable(g_domain, lm) : nullptr;
+	Obj scene = nullptr;
+	if (field != nullptr && vt != nullptr) mono_field_static_get_value(vt, field, &scene);
+	Obj sk   = scene != nullptr ? mono_object_get_class(scene) : nullptr;
+	Obj root = sk != nullptr ? property_get(sk, scene, "RootWidget") : nullptr;
+	if (root == nullptr) {
+		if (log_all) wp_log("tile detect: no root scene");
+		return false;
+	}
+	TileCand best[8];
+	int      nbest = 0, visited = 0;
+	tile_walk(root, 0.0f, 0.0f, 0, visited, best, nbest, "-", !log_all && g_tile_class[0] != 0);
+	int pick = -1;
+	for (int i = 0; i < nbest; ++i) {
+		if (pick < 0 || best[i].w > best[pick].w) pick = i;
+	}
+	if (log_all) {
+		wp_log("tile detect: %d widgets, %d squares in the game row", visited, nbest);
+		for (int i = 0; i < nbest; ++i) {
+			wp_log("tile detect:   %s%s (in %s) at %.0f,%.0f size %.0fx%.0f", i == pick ? "* " : "", best[i].cls, best[i].parent,
+			       best[i].x, best[i].y, best[i].w, best[i].h);
+		}
+	}
+	if (pick < 0) return false;
+	// must look like the highlighted game tile: upper left part of the screen, 130..280 px
+	if (best[pick].w < 130.0f || best[pick].w > 280.0f || best[pick].y > 360.0f || best[pick].x > 1400.0f) {
+		if (log_all) wp_log("tile detect: best square does not look like the game tile, keeping the saved spot");
+		return false;
+	}
+	tx = best[pick].x;
+	ty = best[pick].y;
+	ts = best[pick].w;
+	if (log_all) {
+		snprintf(g_tile_class, sizeof(g_tile_class), "%s", best[pick].cls);
+		// the row: three levels up from the tile (tile -> item -> row -> row's holder), pinned
+		Obj area = best[pick].obj;
+		for (int up = 0; up < 3 && area != nullptr; ++up) {
+			Obj p = property_get(g_ui3_widget, area, "Parent");
+			if (p == nullptr) break;
+			area = p;
+		}
+		if (area != nullptr && area != best[pick].obj) {
+			mono_gchandle_new(area, 1);
+			g_tile_area = area;
+		}
+		wp_log("tile detect: following %s inside %s", g_tile_class, g_tile_area != nullptr && mono_object_get_class(g_tile_area) != nullptr
+		                                                                  ? mono_class_get_name(mono_object_get_class(g_tile_area)) : "nothing (fixed spot)");
+	}
+	return true;
+}
+
+// ---- v0.5 tile effects: a glow behind the highlighted game and sparks when the highlight moves ---
+// ShellUI does not tell the background where it draws the highlighted tile, so the spot comes from
+// the app ("K ... x y size": the user lines it up once in Efectos → Ajustar posición, with a live
+// preview). A move is seen two ways: the highlighted tile's art changes (SetBackground hook) or the
+// home screen slides (BGLayerPlugin.TransitionType). Both layers live in the weather layer, under the
+// widget board. Colours come from tint_q (built once).
+// v0.5.1: a neon outline that hugs the tile (user: the soft aura looked bad). The background is drawn
+// behind the home screen, so a rounded panel a few pixels larger than the tile only shows as a rim
+// around it; a second, wider and fainter one is the glow. The rim's colour travels around the
+// wallpaper's colour (blue -> purple -> pink for a blue wallpaper), like a gradient in motion.
+// v0.5.2: a hollow frame of 8 strips (4 glow + 4 rim), so even when it is not lined up yet it reads
+// as a frame and never as a solid box (a full panel behind the tile showed as a pink block).
+constexpr int kHaloRings = 8; // 0..3 glow strips (wide, faint), 4..7 rim strips (thin, bright)
+constexpr int kSparks    = 20;
+Obj   g_halo[kHaloRings] = {};
+// v0.5.2: once the tile was found on screen the spot is exact, so the outline can be two rounded
+// panels behind the tile (glow, rim) that peek out around it with the tile's own round corners.
+// The strips above stay for a spot placed by hand (no solid block if it is a bit off).
+Obj   g_halo_round[2] = {};
+Obj   g_spark[kSparks]   = {};
+float g_sp_x[kSparks], g_sp_y[kSparks], g_sp_vx[kSparks], g_sp_vy[kSparks];
+long  g_sp_t0 = 0, g_halo_kick = 0, g_tfx_preview_fire = 0;
+int   g_tfx_seen_moves = -1, g_tfx_last_type = -1;
+bool  g_tfx_failed = false, g_tfx_built = false, g_tfx_shown = false;
+// v0.5.2: measured from a photo of the console (Black Myth: Wukong highlighted, second in the row)
+std::atomic<int> g_tile_x {162}, g_tile_y {118}, g_tile_s {181}; // from "K" (1080p coordinates)
+std::atomic<bool> g_tile_preview {false};
+std::atomic<bool> g_tile_follow {false}; // the tile's class is known: look it up again after each move
+std::atomic<bool> g_tile_ready {false};  // a position was saved or detected: draw the outline
+std::atomic<int>  g_focus_moves {0}; // bumped by SetBg_Hook
+
+bool tfx_build() {
+	g_tfx_built = true;
+	if (fx_root() == nullptr) return false;
+	for (int i = 0; i < 2; ++i) { // first: drawn under the strips
+		g_halo_round[i] = fx_panel(-500.0f, 0.0f, 10.0f, 10.0f);
+		if (g_halo_round[i] == nullptr) return false;
+		wg_visible(g_halo_round[i], false);
+	}
+	for (int i = 0; i < kHaloRings; ++i) {
+		g_halo[i] = fx_panel(-500.0f, 0.0f, 10.0f, 10.0f);
+		if (g_halo[i] == nullptr) return false;
+	}
+	for (int i = 0; i < kSparks; ++i) {
+		g_spark[i] = fx_panel(-500.0f, 0.0f, 6.0f, 6.0f);
+		if (g_spark[i] == nullptr) return false;
+		wg_visible(g_spark[i], false);
+	}
+	wp_log("tile fx: glow + sparks ready");
+	return true;
+}
+
+void tfx_hide() {
+	if (!g_tfx_shown) return;
+	g_tfx_shown = false;
+	for (Obj o : g_halo) wg_visible(o, false);
+	for (Obj o : g_halo_round) wg_visible(o, false);
+	for (Obj o : g_spark) wg_visible(o, false);
+	g_sp_t0 = 0;
+}
+
+void tfx_fire(float cx, float cy, float half, uint32_t rgb) {
+	const float r = ((rgb >> 16) & 255) / 255.0f, g = ((rgb >> 8) & 255) / 255.0f, b = (rgb & 255) / 255.0f;
+	for (int i = 0; i < kSparks; ++i) {
+		// v0.5.1: from the tile's own edges, outwards (user: sparks out of the game's box, centred).
+		// Spread evenly over the four sides, a little jitter along each side, an outward push with
+		// some sideways spread.
+		const int   side = i % 4;                         // 0 top, 1 right, 2 bottom, 3 left
+		const float u    = (fx_rand() * 2.0f - 1.0f) * 0.9f; // along the side
+		const float nx   = side == 1 ? 1.0f : side == 3 ? -1.0f : 0.0f, ny = side == 2 ? 1.0f : side == 0 ? -1.0f : 0.0f;
+		const float sp   = 200.0f + fx_rand() * 260.0f;
+		g_sp_x[i]        = cx + (nx != 0 ? nx * half : u * half) - 2.5f;
+		g_sp_y[i]        = cy + (ny != 0 ? ny * half : u * half) - 2.5f;
+		g_sp_vx[i]       = (nx != 0 ? nx : u * 0.6f) * sp;
+		g_sp_vy[i]       = (ny != 0 ? ny : u * 0.6f) * sp;
+		const float w  = fx_rand(); // some white-hot, most in the wallpaper's colour
+		const float sz = 3.0f + fx_rand() * 4.0f;
+		void* col = tint_q(r + (1 - r) * w * 0.8f, g + (1 - g) * w * 0.8f, b + (1 - b) * w * 0.8f, 1.0f);
+		if (col != nullptr) property_set(g_dim_class, g_spark[i], g_dim_prop, col);
+		wg_rect(g_spark[i], g_sp_x[i], g_sp_y[i], sz, sz);
+		wg_round(g_spark[i], sz * 0.5f);
+		wg_opacity(g_spark[i], 1.0f);
+		wg_visible(g_spark[i], true);
+	}
+	g_sp_t0     = now_ms();
+	g_halo_kick = g_sp_t0;
+}
+
+void tile_fx_tick() {
+	const bool preview = g_tile_preview.load();
+	if ((!g_tilefx.load() && !preview) || g_tfx_failed || !video_active()) {
+		tfx_hide();
+		return;
+	}
+	if (!g_tfx_built && !tfx_build()) {
+		g_tfx_failed = true;
+		return;
+	}
+	static long first_seen = 0;
+	static bool auto_done  = false;
+	if (first_seen == 0) first_seen = now_ms();
+	if (!auto_done && g_tile_area == nullptr && now_ms() - first_seen > 5000) {
+		auto_done         = true; // v0.5.2: find the tile by itself once, no button needed
+		g_tile_detect_req = true;
+	}
+	if (g_tile_detect_req.exchange(false)) { // automatic once, or the app's "Detectar sola"
+		float tx, ty, ts;
+		if (tile_detect(tx, ty, ts, true)) {
+			char msg[64];
+			snprintf(msg, sizeof(msg), "%d %d %d", static_cast<int>(tx), static_cast<int>(ty), static_cast<int>(ts));
+			to_payload('T', msg, strlen(msg));
+			g_tile_x      = static_cast<int>(tx);
+			g_tile_y      = static_cast<int>(ty);
+			g_tile_s      = static_cast<int>(ts);
+			g_tile_follow = true;
+		} else {
+			to_payload('T', "none", 4);
+		}
+	}
+	const float    s  = static_cast<float>(g_tile_s.load());
+	const float    x0 = static_cast<float>(g_tile_x.load()), y0 = static_cast<float>(g_tile_y.load());
+	const float    cx = x0 + s * 0.5f, cy = y0 + s * 0.5f;
+	const uint32_t rgb = g_wall_rgb.load();
+	const long     now = now_ms();
+	static float last_geo[4] = {-1, -1, -1, -1};
+	// v0.5.2: always the rounded outline (user: the frame must take the tile's shape). The default spot
+	// is now measured on a real console, so it no longer shows as a block when not detected.
+	const float  round_mode  = 1.0f;
+	if (!g_tfx_shown || last_geo[0] != x0 || last_geo[1] != y0 || last_geo[2] != s || last_geo[3] != round_mode) { // place the rings
+		g_tfx_shown = true;
+		last_geo[0] = x0;
+		last_geo[1] = y0;
+		last_geo[2] = s;
+		last_geo[3] = round_mode;
+		for (int i = 0; i < 2; ++i) { // rounded: glow 8 px out, rim 4 px out, corners like the tile's
+			const float pad = i == 0 ? 8.0f : 4.0f;
+			wg_rect(g_halo_round[i], x0 - pad, y0 - pad, s + 2 * pad, s + 2 * pad);
+			wg_round(g_halo_round[i], s * 0.115f + pad); // PS5 tiles: ~11% corner radius (photo)
+			wg_visible(g_halo_round[i], round_mode > 0);
+		}
+		for (int i = 0; i < kHaloRings && round_mode > 0; ++i) wg_visible(g_halo[i], false);
+		for (int i = 0; i < kHaloRings && round_mode == 0; ++i) {
+			const bool  rim = i >= 4;
+			const float pad = rim ? 4.0f : 8.0f, th = rim ? 3.0f : 7.0f; // outside the tile / thickness
+			const float L = x0 - pad, T = y0 - pad, W = s + 2 * pad, cr = s * 0.07f; // corner: stay clear of it
+			switch (i % 4) {
+			case 0: wg_rect(g_halo[i], L + cr, T, W - 2 * cr, th); break;          // top
+			case 1: wg_rect(g_halo[i], L + cr, T + W - th, W - 2 * cr, th); break; // bottom
+			case 2: wg_rect(g_halo[i], L, T + cr, th, W - 2 * cr); break;          // left
+			default: wg_rect(g_halo[i], L + W - th, T + cr, th, W - 2 * cr); break; // right
+			}
+			wg_round(g_halo[i], th * 0.5f);
+			wg_visible(g_halo[i], true);
+		}
+	}
+	// a move: the tile's art changed or the home screen slid
+	const int moves = g_focus_moves.load();
+	const int type  = px_transition();
+	bool      moved = false;
+	if (moves != g_tfx_seen_moves) {
+		moved            = g_tfx_seen_moves >= 0;
+		g_tfx_seen_moves = moves;
+	}
+	if (type != g_tfx_last_type) {
+		moved           = moved || (type >= 0 && (type == g_px_left || type == g_px_right));
+		g_tfx_last_type = type;
+	}
+	if (preview && now - g_tfx_preview_fire > 1600) { // while lining it up: sparks every 1.6 s
+		g_tfx_preview_fire = now;
+		moved              = true;
+	}
+	static long follow_at = 0;
+	if (moved && g_tile_follow.load() && g_tile_area != nullptr) follow_at = now + 260; // after the slide
+	if (follow_at != 0 && now >= follow_at) {
+		follow_at = 0;
+		float tx, ty, ts;
+		if (tile_follow(tx, ty, ts)) {
+			g_tile_x = static_cast<int>(tx);
+			g_tile_y = static_cast<int>(ty);
+			g_tile_s = static_cast<int>(ts);
+		}
+	}
+	if (moved && g_spark[0] != nullptr) tfx_fire(cx, cy, s * 0.5f, rgb);
+	// outline: the rim's colour drifts around the wallpaper's hue; it flares on a move
+	if (g_tick % 2 == 0) {
+		const float kick = g_halo_kick != 0 && now - g_halo_kick < 600 ? 1.0f - (now - g_halo_kick) / 600.0f : 0.0f;
+		float r = ((rgb >> 16) & 255) / 255.0f, g = ((rgb >> 8) & 255) / 255.0f, b = (rgb & 255) / 255.0f;
+		// hue shift by rotating around the grey axis (cheap, keeps brightness): +-50 degrees
+		const float ang = 0.87f * sinf(now / 1400.0f);
+		const float cs = cosf(ang), sn = sinf(ang), k1 = (1 - cs) / 3, k2 = sn * 0.57735f;
+		const float rr = r * (cs + k1) + g * (k1 - k2) + b * (k1 + k2);
+		const float gg = r * (k1 + k2) + g * (cs + k1) + b * (k1 - k2);
+		const float bb = r * (k1 - k2) + g * (k1 + k2) + b * (cs + k1);
+		const float lift = 0.25f + 0.35f * kick; // a bit towards white so the rim reads as light
+		r = rr + (1 - rr) * lift;
+		g = gg + (1 - gg) * lift;
+		b = bb + (1 - bb) * lift;
+		void* glow = tint_q(r, g, b, preview ? 0.45f : 0.16f + 0.10f * (0.5f + 0.5f * sinf(now / 900.0f)) + 0.20f * kick);
+		void* rim  = tint_q(r, g, b, 1.0f);
+		if (round_mode > 0) {
+			if (glow != nullptr) property_set(g_dim_class, g_halo_round[0], g_dim_prop, glow);
+			if (rim != nullptr) property_set(g_dim_class, g_halo_round[1], g_dim_prop, rim);
+		} else {
+			for (int k = 0; k < kHaloRings; ++k) {
+				void* col = k >= 4 ? rim : glow;
+				if (col != nullptr) property_set(g_dim_class, g_halo[k], g_dim_prop, col);
+			}
+		}
+	}
+	// sparks fly out, fall a little and fade
+	if (g_sp_t0 != 0) {
+		const float e = (now - g_sp_t0) / 1000.0f;
+		if (e >= 0.8f) {
+			for (Obj o : g_spark) wg_visible(o, false);
+			g_sp_t0 = 0;
+		} else {
+			const float dt = 1.0f / 30.0f;
+			for (int i = 0; i < kSparks; ++i) {
+				g_sp_vy[i] += 260.0f * dt; // a light fall, so they stay around the tile
+				g_sp_vx[i] *= 0.93f;
+				g_sp_vy[i] *= 0.95f;
+				g_sp_x[i] += g_sp_vx[i] * dt;
+				g_sp_y[i] += g_sp_vy[i] * dt;
+				property_set(g_ui3_widget, g_spark[i], "X", &g_sp_x[i]);
+				property_set(g_ui3_widget, g_spark[i], "Y", &g_sp_y[i]);
+				wg_opacity(g_spark[i], 1.0f - e / 0.8f);
+			}
+		}
 	}
 }
 
@@ -2946,55 +3786,127 @@ void xfade_tick() {
 	}
 }
 
-// v0.3.2: "Cerrar" closes the bayo.sh window for real: ShellAppManager.GetLastShellApp() is the app
-// that was just in front (ours, since the user pressed Cerrar in it); ExitApp() only if its TitleId
-// is BYSH00001, so another app is never touched.
-void exit_our_app() {
-	Obj mgr = find_class("Sce.Vsh.ShellUI.AppSystem", "ShellAppManager");
-	Obj get = mgr != nullptr ? mono_class_get_method_from_name(mgr, "GetLastShellApp", 0) : nullptr;
-	if (get == nullptr) {
-		wp_log("exitapp: ShellAppManager.GetLastShellApp not found");
-		return;
+// "Cerrar" closes the bayo.sh window for real. v0.3.2 asked ShellAppManager.GetLastShellApp(), but on
+// the console that was not our window (the list it reads was empty). v0.5 looks through every app
+// ShellAppManager can hand out (single getters and lists) and calls ExitApp() only on the one whose
+// TitleId is BYSH00001, so another app is never touched. The manager's method names go to the log
+// once, so a firmware that names them differently can be matched next time.
+bool app_title(Obj app, char* tid, size_t n) {
+	tid[0] = 0;
+	if (app == nullptr) return false;
+	Obj klass = mono_object_get_class(app);
+	Obj tid_m = klass != nullptr ? find_method_up(klass, "get_TitleId", 0) : nullptr;
+	if (tid_m == nullptr) return false;
+	Obj exc = nullptr;
+	Obj str = mono_runtime_invoke(tid_m, app, nullptr, &exc);
+	if (str == nullptr || exc != nullptr) return true; // an app, title unknown
+	char* u = mono_string_to_utf8(static_cast<char*>(str));
+	snprintf(tid, n, "%s", u != nullptr ? u : "");
+	return true;
+}
+
+bool exit_if_ours(Obj app, const char* via) {
+	char tid[64];
+	if (!app_title(app, tid, sizeof(tid))) return false;
+	if (strcmp(tid, "BYSH00001") != 0) {
+		wp_log("exitapp: %s -> %s (not ours)", via, tid[0] ? tid : "?");
+		return false;
+	}
+	Obj ex_m = find_method_up(mono_object_get_class(app), "ExitApp", 0);
+	if (ex_m == nullptr) {
+		wp_log("exitapp: %s -> ours, but no ExitApp()", via);
+		return false;
 	}
 	Obj exc = nullptr;
-	Obj app = mono_runtime_invoke(get, nullptr, nullptr, &exc);
-	if (exc != nullptr || app == nullptr) {
-		wp_log("exitapp: no last app (exception %p)", exc);
-		return;
-	}
-	Obj klass = mono_object_get_class(app);
-	Obj tid_m = find_method_up(klass, "get_TitleId", 0);
-	Obj name_m = find_method_up(klass, "get_Name", 0);
-	char tid[64] = "?", name[96] = "?";
-	if (tid_m != nullptr) {
-		exc = nullptr;
-		Obj s = mono_runtime_invoke(tid_m, app, nullptr, &exc);
-		if (s != nullptr && exc == nullptr) {
-			char* u = mono_string_to_utf8(s);
-			snprintf(tid, sizeof(tid), "%s", u ? u : "");
-		}
-	}
-	if (name_m != nullptr) {
-		exc = nullptr;
-		Obj s = mono_runtime_invoke(name_m, app, nullptr, &exc);
-		if (s != nullptr && exc == nullptr) {
-			char* u = mono_string_to_utf8(s);
-			snprintf(name, sizeof(name), "%s", u ? u : "");
-		}
-	}
-	wp_log("exitapp: last app %s '%s' (%s)", tid, name, klass ? mono_class_get_name(klass) : "?");
-	if (strcmp(tid, "BYSH00001") != 0) {
-		wp_log("exitapp: not our window, left alone");
-		return;
-	}
-	Obj ex_m = find_method_up(klass, "ExitApp", 0);
-	if (ex_m == nullptr) {
-		wp_log("exitapp: ExitApp() not found");
-		return;
-	}
-	exc = nullptr;
 	mono_runtime_invoke(ex_m, app, nullptr, &exc);
-	wp_log("exitapp: ExitApp() %s", exc == nullptr ? "done" : "threw");
+	wp_log("exitapp: %s -> ExitApp() %s", via, exc == nullptr ? "done" : "threw");
+	return exc == nullptr;
+}
+
+// A value from a getter: one app, an array of apps or a list (Count / get_Item).
+bool exit_in_value(Obj v, const char* via) {
+	if (v == nullptr) return false;
+	if (exit_if_ours(v, via)) return true;
+	Obj         klass = mono_object_get_class(v);
+	const char* cn    = klass != nullptr ? mono_class_get_name(klass) : nullptr;
+	if (cn == nullptr) return false;
+	Obj count_m = find_method_up(klass, "get_Count", 0), item_m = find_method_up(klass, "get_Item", 1);
+	Obj len_m   = find_method_up(klass, "get_Length", 0);
+	Obj getv_m  = nullptr;
+	if (count_m == nullptr && len_m != nullptr && strchr(cn, '[') != nullptr) {
+		Obj d  = mono_method_desc_new("System.Array:GetValue(int)", 1);
+		Obj ac = mono_class_from_name(mono_get_corlib(), "System", "Array");
+		getv_m = d != nullptr && ac != nullptr ? mono_method_desc_search_in_class(d, ac) : nullptr;
+		if (d != nullptr) mono_method_desc_free(d);
+	}
+	Obj cm = count_m != nullptr && item_m != nullptr ? count_m : getv_m != nullptr ? len_m : nullptr;
+	Obj im = count_m != nullptr && item_m != nullptr ? item_m : getv_m;
+	if (cm == nullptr || im == nullptr) return false;
+	Obj exc = nullptr;
+	Obj nb  = mono_runtime_invoke(cm, v, nullptr, &exc);
+	const int n = nb != nullptr && exc == nullptr ? *static_cast<int32_t*>(mono_object_unbox(nb)) : 0;
+	wp_log("exitapp: %s is %s with %d", via, cn, n);
+	for (int32_t i = 0; i < n && i < 32; ++i) {
+		void* args[1] = {&i};
+		exc           = nullptr;
+		Obj e         = mono_runtime_invoke(im, v, args, &exc);
+		if (exc == nullptr && exit_if_ours(e, via)) return true;
+	}
+	return false;
+}
+
+void exit_our_app() {
+	Obj mgr = find_class("Sce.Vsh.ShellUI.AppSystem", "ShellAppManager");
+	if (mgr == nullptr) {
+		wp_log("exitapp: ShellAppManager not found");
+		return;
+	}
+	static bool listed = false;
+	if (!listed && mono_class_get_methods != nullptr) { // once: what this firmware offers
+		listed = true;
+		char   line[1200];
+		size_t n    = 0;
+		void*  iter = nullptr;
+		while (Obj m = mono_class_get_methods(mgr, &iter)) {
+			const char* mn = mono_method_get_name(m);
+			if (mn == nullptr || !name_has(mn, {"App", "Shell", "Get", "Exit", "Close"})) continue;
+			const int w = snprintf(line + n, sizeof(line) - n, "%s ", mn);
+			if (w < 0 || n + static_cast<size_t>(w) >= sizeof(line)) break;
+			n += static_cast<size_t>(w);
+		}
+		line[n] = 0;
+		wp_log("exitapp: ShellAppManager has %s", line);
+	}
+	// Static getters first (GetLastShellApp was static in v0.3.2), then the same names on Instance.
+	static const char* const kGetters[] = {"GetLastShellApp", "GetActiveShellApp", "GetForegroundShellApp", "GetFocusedShellApp",
+	                                       "GetCurrentShellApp", "GetTopShellApp", "GetShellApps", "GetShellAppList",
+	                                       "GetAllShellApps", "get_ShellApps", "get_AppList", "get_Apps", "GetApps"};
+	Obj inst = nullptr;
+	{
+		Obj prop = mono_class_get_property_from_name(mgr, "Instance");
+		Obj get  = prop != nullptr ? mono_property_get_get_method(prop) : nullptr;
+		Obj exc  = nullptr;
+		inst     = get != nullptr ? mono_runtime_invoke(get, nullptr, nullptr, &exc) : nullptr;
+		if (exc != nullptr) inst = nullptr;
+	}
+	for (const char* g : kGetters) {
+		Obj m = mono_class_get_method_from_name(mgr, g, 0);
+		if (m == nullptr) continue;
+		// Static methods ignore the target; instance ones get the singleton (null only if there is none,
+		// as v0.3.2 called GetLastShellApp).
+		Obj exc = nullptr;
+		Obj v   = mono_runtime_invoke(m, inst, nullptr, &exc);
+		if (exc != nullptr) {
+			wp_log("exitapp: %s threw", g);
+			continue;
+		}
+		if (v == nullptr) {
+			wp_log("exitapp: %s -> null", g);
+			continue;
+		}
+		if (exit_in_value(v, g)) return;
+	}
+	wp_log("exitapp: our window was not found; going home instead");
 }
 
 void focus_tick() {
@@ -3248,6 +4160,18 @@ void setup_parallax() {
 	wp_log("parallax: TransitionType getter %p, SlideInLeft %d, SlideInRight %d", g_px_getter, g_px_left, g_px_right);
 }
 
+// One TransitionType read per frame, shared by the parallax and the tile sweep. -1 = unknown.
+int px_transition() {
+	static int cached_tick = -1, cached = -1;
+	if (cached_tick == g_tick) return cached;
+	cached_tick = g_tick;
+	if (!g_px_ready) setup_parallax();
+	if (g_px_getter == nullptr || g_px_left < 0) return cached = -1;
+	Obj exc = nullptr;
+	Obj val = mono_runtime_invoke(g_px_getter, g_plugin, nullptr, &exc);
+	return cached = exc == nullptr && val != nullptr ? *static_cast<int*>(mono_object_unbox(val)) : -1;
+}
+
 void place_view(Obj view, bool parallax, float shift) {
 	float x = parallax ? -kOverX + shift : 0.0f, y = parallax ? -kOverY : 0.0f;
 	float w = parallax ? 1920.0f + 2 * kOverX : 1920.0f, h = parallax ? 1080.0f + 2 * kOverY : 1080.0f;
@@ -3273,15 +4197,10 @@ void parallax_tick() {
 	if (!on) {
 		return;
 	}
-	if (!g_px_ready) {
-		setup_parallax();
-	}
-	if (g_px_getter == nullptr || g_px_left < 0) {
+	const int type = px_transition();
+	if (type < 0) {
 		return;
 	}
-	Obj exc = nullptr;
-	Obj val = mono_runtime_invoke(g_px_getter, g_plugin, nullptr, &exc);
-	const int type = exc == nullptr && val != nullptr ? *static_cast<int*>(mono_object_unbox(val)) : -1;
 	if (type != g_px_last) {
 		g_px_last = type;
 		if (type == g_px_left || type == g_px_right) {
@@ -3347,6 +4266,11 @@ uint64_t SetBg_Hook(Obj self, Obj param) {
 		// non-game tiles use bg_hub_default. Tell the payload which game is highlighted.
 		const char* img = prop_text(param, "NextImageUri");
 		if (img != nullptr && img[0] != 0) {
+			static char last_img[160] = "";
+			if (strncmp(img, last_img, sizeof(last_img) - 1) != 0) { // v0.5 tile fx: the highlight moved
+				snprintf(last_img, sizeof(last_img), "%s", img);
+				++g_focus_moves;
+			}
 			std::string tid;
 			for (const char* key : {"/user/appmeta/", "/user/app/"}) {
 				const char* p = strstr(img, key);
@@ -3811,6 +4735,10 @@ void Update_Hook(Obj self) {
 		if (g_tick % 15 == 0) {
 			widgets_tick();
 		}
+		if (g_tick % 2 == 0) {
+			fx_tick();      // weather effect, ~30 updates/s while it is on
+			tile_fx_tick(); // glow + sparks on the highlighted game
+		}
 		if (true) { // every frame: the menu fade needs it (just a static field read)
 			focus_tick();
 			parallax_tick();
@@ -3875,6 +4803,7 @@ int (*p_fg_user)(int* user)                              = nullptr;
 int (*p_pad_init)()                                      = nullptr;
 int (*p_pad_open)(int user, int type, int index, const void* param) = nullptr;
 int (*p_login_users)(int* users)                         = nullptr;
+int (*p_pad_read)(int handle, void* data)                = nullptr; // v0.5: scePadReadState (buttons)
 
 int pad_handle_now() {
 	static int dumps = 0;
@@ -4003,7 +4932,7 @@ void* cmd_udp_thread(void*) {
 		return nullptr;
 	}
 	wp_log("commands: listening on 9053");
-	char buf[720];
+	char buf[960];
 	char last_x[64] = {};
 	for (;;) {
 		const ssize_t n = recv(s, buf, sizeof(buf) - 1, 0);
@@ -4016,6 +4945,28 @@ void* cmd_udp_thread(void*) {
 				snprintf(g_wg_text, sizeof(g_wg_text), "%s", buf + 2);
 				++g_wg_seq;
 			}
+		} else if (buf[0] == 'K' && buf[1] == ' ') {
+			int      r = 0, t = 0, tx = -1, ty = -1, ts = -1, pv = 0, rd = 0, fw = 0;
+			char     hex[8] = {};
+			if (sscanf(buf + 2, "%d %d %7s %d %d %d %d %d %d", &r, &t, hex, &tx, &ty, &ts, &pv, &rd, &fw) >= 2) {
+				g_tile_ready = rd != 0;
+				if (fw != 0 && !g_tile_follow.load() && g_tile_class[0] == 0) g_tile_detect_req = true; // detected before: again now
+				if (!g_tile_follow.load() && ts >= 40 && ts <= 700 && tx >= -200 && tx <= 1920 && ty >= -200 && ty <= 1080) {
+					g_tile_x = tx;
+					g_tile_y = ty;
+					g_tile_s = ts;
+				}
+				g_tile_preview = pv != 0;
+				if (g_react.load() != (r != 0) || g_tilefx.load() != (t != 0)) wp_log("command: K react %d tilefx %d", r, t);
+				g_react  = r != 0;
+				g_tilefx = t != 0;
+				if (strlen(hex) == 6) g_wall_rgb = static_cast<uint32_t>(strtoul(hex, nullptr, 16));
+			}
+		} else if (buf[0] == 'C' && buf[1] == ' ') {
+			if (strcmp(buf + 2, g_fx_text) != 0) {
+				snprintf(g_fx_text, sizeof(g_fx_text), "%s", buf + 2);
+				++g_fx_seq;
+			}
 		} else if (buf[0] == 'L' && buf[1] == ' ') {
 			if (strcmp(buf + 2, g_light_udp) != 0) {
 				snprintf(g_light_udp, sizeof(g_light_udp), "%s", buf + 2);
@@ -4026,6 +4977,8 @@ void* cmd_udp_thread(void*) {
 			wp_log("command: %s", buf + 2);
 			if (strncmp(buf + 2, "exitapp", 7) == 0) {
 				g_exit_app_req = true;
+			} else if (strncmp(buf + 2, "tiledetect", 10) == 0) {
+				g_tile_detect_req = true;
 			}
 		}
 	}
@@ -4040,9 +4993,16 @@ void* light_thread(void*) {
 	bool     told      = true;
 	uint32_t sent      = 0xffffffffu;
 	int      tick      = 0, refresh = 0, fails = 0;
+	// v0.5 button flashes: read the pad ~40 times/s and blend a PlayStation colour in for 0.4 s.
+	uint32_t prev_buttons = 0, flash_col = 0;
+	long     flash_t = 0;
+	int      read_fails = 0;
+	bool     read_told = false;
+	alignas(16) uint8_t pad_data[1024]; // ScePadData is far smaller; room to spare
 	for (;;) {
-		usleep(50 * 1000);
-		if (tick++ % 8 == 0) {
+		const bool react = g_react.load() && p_pad_read != nullptr && read_fails < 20;
+		usleep(react ? 25 * 1000 : 50 * 1000);
+		if (tick++ % (react ? 16 : 8) == 0) {
 			char line[160] = {};
 			static int udp_seen = 0;
 			if (g_light_udp_seq.load() != 0) {
@@ -4077,6 +5037,29 @@ void* light_thread(void*) {
 			continue; // never touched the bar: leave the system's colour alone
 		}
 		const long  ms  = now_ms();
+		if (react && !off && handle >= 0) {
+			memset(pad_data, 0, sizeof(pad_data));
+			const int rr = p_pad_read(handle, pad_data);
+			if (rr != 0) {
+				if (++read_fails >= 20) wp_log("buttons: scePadReadState rc %#x, flashes off", static_cast<unsigned>(rr));
+			} else {
+				read_fails = 0;
+				uint32_t buttons = 0;
+				memcpy(&buttons, pad_data, sizeof(buttons)); // ScePadData.buttons comes first
+				if (!read_told) {
+					read_told = true;
+					wp_log("buttons: reading the pad (handle %#x)", static_cast<unsigned>(handle));
+				}
+				const uint32_t down = buttons & ~prev_buttons;
+				prev_buttons        = buttons;
+				if (down != 0) {
+					// △ green, ○ red, ✕ blue, □ pink; anything else white
+					flash_col = (down & 0x1000u) ? 0x2ee5b5u : (down & 0x2000u) ? 0xff3b3bu : (down & 0x4000u) ? 0x3d8bffu
+					          : (down & 0x8000u) ? 0xff3d9au : 0xffffffu;
+					flash_t   = ms;
+				}
+			}
+		}
 		const float per = req.speed == 0 ? 1.6f : req.speed == 2 ? 0.55f : 1.0f; // slow / normal / fast
 		uint32_t    col = req.n > 0 ? req.c[0] : 0x22b8ffu;
 		if (strcmp(req.mode, "rainbow") == 0) {
@@ -4093,6 +5076,15 @@ void* light_thread(void*) {
 			const int   i   = static_cast<int>(pos);
 			const float f   = pos - i;
 			col = light_mix(req.c[i % req.n], req.c[(i + 1) % req.n], f < 0.6f ? 0 : (f - 0.6f) / 0.4f);
+		}
+		if (flash_t != 0 && !off) {
+			const long e = ms - flash_t;
+			if (e >= 420) {
+				flash_t = 0;
+			} else {
+				const float t = static_cast<float>(e) / 420.0f;
+				col = light_mix(flash_col, col, t * t); // full colour at once, then eases back
+			}
 		}
 		if (!off && col == sent && ++refresh < 60) {
 			continue;
@@ -4348,6 +5340,7 @@ extern "C" int main(int argc, char const* argv[]) {
 		p_pad_init    = reinterpret_cast<int (*)()>(rx_lookup("scePadInit"));
 		p_pad_open    = reinterpret_cast<int (*)(int, int, int, const void*)>(rx_lookup("scePadOpen"));
 		p_login_users = reinterpret_cast<int (*)(int*)>(rx_lookup("sceUserServiceGetLoginUserIdList"));
+		p_pad_read    = reinterpret_cast<int (*)(int, void*)>(rx_lookup("scePadReadState"));
 		wp_log("light bar symbols: handle %p set %p reset %p user %p", reinterpret_cast<void*>(p_pad_handle),
 		       reinterpret_cast<void*>(p_pad_light), reinterpret_cast<void*>(p_pad_reset), reinterpret_cast<void*>(p_fg_user));
 		g_dlsym                   = nullptr;
