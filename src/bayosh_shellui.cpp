@@ -2969,6 +2969,10 @@ bool tile_detect(float& tx, float& ty, float& ts, bool log_all) {
 constexpr int kHaloRings = 8; // 0..3 glow strips (wide, faint), 4..7 rim strips (thin, bright)
 constexpr int kSparks    = 20;
 Obj   g_halo[kHaloRings] = {};
+// v0.5.2: once the tile was found on screen the spot is exact, so the outline can be two rounded
+// panels behind the tile (glow, rim) that peek out around it with the tile's own round corners.
+// The strips above stay for a spot placed by hand (no solid block if it is a bit off).
+Obj   g_halo_round[2] = {};
 Obj   g_spark[kSparks]   = {};
 float g_sp_x[kSparks], g_sp_y[kSparks], g_sp_vx[kSparks], g_sp_vy[kSparks];
 long  g_sp_t0 = 0, g_halo_kick = 0, g_tfx_preview_fire = 0;
@@ -2984,6 +2988,11 @@ std::atomic<int>  g_focus_moves {0}; // bumped by SetBg_Hook
 bool tfx_build() {
 	g_tfx_built = true;
 	if (fx_root() == nullptr) return false;
+	for (int i = 0; i < 2; ++i) { // first: drawn under the strips
+		g_halo_round[i] = fx_panel(-500.0f, 0.0f, 10.0f, 10.0f);
+		if (g_halo_round[i] == nullptr) return false;
+		wg_visible(g_halo_round[i], false);
+	}
 	for (int i = 0; i < kHaloRings; ++i) {
 		g_halo[i] = fx_panel(-500.0f, 0.0f, 10.0f, 10.0f);
 		if (g_halo[i] == nullptr) return false;
@@ -3001,6 +3010,7 @@ void tfx_hide() {
 	if (!g_tfx_shown) return;
 	g_tfx_shown = false;
 	for (Obj o : g_halo) wg_visible(o, false);
+	for (Obj o : g_halo_round) wg_visible(o, false);
 	for (Obj o : g_spark) wg_visible(o, false);
 	g_sp_t0 = 0;
 }
@@ -3068,13 +3078,22 @@ void tile_fx_tick() {
 	const float    cx = x0 + s * 0.5f, cy = y0 + s * 0.5f;
 	const uint32_t rgb = g_wall_rgb.load();
 	const long     now = now_ms();
-	static float last_geo[3] = {-1, -1, -1};
-	if (!g_tfx_shown || last_geo[0] != x0 || last_geo[1] != y0 || last_geo[2] != s) { // place the rings
+	static float last_geo[4] = {-1, -1, -1, -1};
+	const float  round_mode  = g_tile_follow.load() ? 1.0f : 0.0f;
+	if (!g_tfx_shown || last_geo[0] != x0 || last_geo[1] != y0 || last_geo[2] != s || last_geo[3] != round_mode) { // place the rings
 		g_tfx_shown = true;
 		last_geo[0] = x0;
 		last_geo[1] = y0;
 		last_geo[2] = s;
-		for (int i = 0; i < kHaloRings; ++i) {
+		last_geo[3] = round_mode;
+		for (int i = 0; i < 2; ++i) { // rounded: glow 8 px out, rim 4 px out, corners like the tile's
+			const float pad = i == 0 ? 8.0f : 4.0f;
+			wg_rect(g_halo_round[i], x0 - pad, y0 - pad, s + 2 * pad, s + 2 * pad);
+			wg_round(g_halo_round[i], s * 0.07f + pad);
+			wg_visible(g_halo_round[i], round_mode > 0);
+		}
+		for (int i = 0; i < kHaloRings && round_mode > 0; ++i) wg_visible(g_halo[i], false);
+		for (int i = 0; i < kHaloRings && round_mode == 0; ++i) {
 			const bool  rim = i >= 4;
 			const float pad = rim ? 4.0f : 8.0f, th = rim ? 3.0f : 7.0f; // outside the tile / thickness
 			const float L = x0 - pad, T = y0 - pad, W = s + 2 * pad, cr = s * 0.07f; // corner: stay clear of it
@@ -3132,9 +3151,14 @@ void tile_fx_tick() {
 		b = bb + (1 - bb) * lift;
 		void* glow = tint_q(r, g, b, preview ? 0.45f : 0.16f + 0.10f * (0.5f + 0.5f * sinf(now / 900.0f)) + 0.20f * kick);
 		void* rim  = tint_q(r, g, b, 1.0f);
-		for (int k = 0; k < kHaloRings; ++k) {
-			void* col = k >= 4 ? rim : glow;
-			if (col != nullptr) property_set(g_dim_class, g_halo[k], g_dim_prop, col);
+		if (g_tile_follow.load()) {
+			if (glow != nullptr) property_set(g_dim_class, g_halo_round[0], g_dim_prop, glow);
+			if (rim != nullptr) property_set(g_dim_class, g_halo_round[1], g_dim_prop, rim);
+		} else {
+			for (int k = 0; k < kHaloRings; ++k) {
+				void* col = k >= 4 ? rim : glow;
+				if (col != nullptr) property_set(g_dim_class, g_halo[k], g_dim_prop, col);
+			}
 		}
 	}
 	// sparks fly out, fall a little and fade
